@@ -32,13 +32,6 @@ fun CalloutView(
             fontSize = 24.sp,
             modifier = Modifier.padding(end = 8.dp)
         )
-        Text(
-            text = label,
-            fontSize = 14.sp,
-            color = Color.White,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
