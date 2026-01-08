@@ -14,6 +14,7 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
     private let annotationController: AnnotationController?
     private let gesturesController: GesturesController?
     private let interactionsController: InteractionsController?
+    private let viewAnnotationController: ViewAnnotationController
     private let eventHandler: MapboxEventHandler
     private let binaryMessenger: SuffixBinaryMessenger
 
@@ -69,6 +70,8 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
         GesturesSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: gesturesController, messageChannelSuffix: binaryMessenger.suffix)
 
         interactionsController = InteractionsController(withMapView: mapView)
+        
+        viewAnnotationController = ViewAnnotationController(mapView: mapView)
 
         let logoController = LogoController(withMapView: mapView)
         LogoSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: logoController, messageChannelSuffix: binaryMessenger.suffix)
@@ -168,6 +171,69 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
         HttpServiceFactory.setHttpServiceInterceptorForInterceptor(customInterceptor)
             customInterceptor.customHeaders = headers
         result(nil)
+
+        case "viewAnnotation#add":
+            guard let args = methodCall.arguments as? [String: Any],
+                  let id = args["id"] as? String,
+                  let layoutName = args["layoutName"] as? String,
+                  let latitude = args["latitude"] as? Double,
+                  let longitude = args["longitude"] as? Double else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing required arguments", details: nil))
+                return
+            }
+            let data = args["data"] as? [String: Any]
+            let anchor = args["anchor"] as? String
+            let allowOverlap = args["allowOverlap"] as? Bool ?? true
+            
+            switch viewAnnotationController.add(
+                id: id,
+                layoutName: layoutName,
+                latitude: latitude,
+                longitude: longitude,
+                data: data,
+                anchor: anchor,
+                allowOverlap: allowOverlap
+            ) {
+            case .success:
+                result(nil)
+            case .failure(let error):
+                result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: error.localizedDescription, details: nil))
+            }
+
+        case "viewAnnotation#update":
+            guard let args = methodCall.arguments as? [String: Any],
+                  let id = args["id"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing required arguments", details: nil))
+                return
+            }
+            let latitude = args["latitude"] as? Double
+            let longitude = args["longitude"] as? Double
+            let data = args["data"] as? [String: Any]
+            
+            switch viewAnnotationController.update(id: id, latitude: latitude, longitude: longitude, data: data) {
+            case .success:
+                result(nil)
+            case .failure(let error):
+                result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: error.localizedDescription, details: nil))
+            }
+
+        case "viewAnnotation#remove":
+            guard let args = methodCall.arguments as? [String: Any],
+                  let id = args["id"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing required arguments", details: nil))
+                return
+            }
+            
+            switch viewAnnotationController.remove(id: id) {
+            case .success:
+                result(nil)
+            case .failure(let error):
+                result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: error.localizedDescription, details: nil))
+            }
+
+        case "viewAnnotation#removeAll":
+            viewAnnotationController.removeAll()
+            result(nil)
 
         default:
             result(FlutterMethodNotImplemented)

@@ -124,6 +124,7 @@ class MapboxMapController(
   private val viewportController: ViewportController
   private val performanceStatisticsController: PerformanceStatisticsController
   private val mapRecorderController: MapRecorderController
+  private val viewAnnotationController: ViewAnnotationController
 
   private val eventHandler: MapboxEventHandler
 
@@ -209,6 +210,7 @@ class MapboxMapController(
     viewportController = ViewportController(mapView.viewport, mapView.camera, context, mapboxMap)
     performanceStatisticsController = PerformanceStatisticsController(mapboxMap, this.messenger, this.channelSuffix)
     mapRecorderController = MapRecorderController(mapboxMap)
+    viewAnnotationController = ViewAnnotationController(mapView)
     changeUserAgent(pluginVersion)
 
     StyleManager.setUp(messenger, styleController, this.channelSuffix)
@@ -354,6 +356,39 @@ class MapboxMapController(
         } catch (e: Exception) {
           result.error("HEADER_ERROR", e.message, null)
         }
+      }
+      "viewAnnotation#add" -> {
+        val id = call.argument<String>("id")!!
+        val layoutName = call.argument<String>("layoutName")!!
+        val latitude = call.argument<Double>("latitude")!!
+        val longitude = call.argument<Double>("longitude")!!
+        val data = call.argument<Map<String, Any?>>("data")
+        val anchor = call.argument<String>("anchor")
+        val allowOverlap = call.argument<Boolean>("allowOverlap") ?: true
+
+        viewAnnotationController.add(id, layoutName, latitude, longitude, data, anchor, allowOverlap)
+          .onSuccess { result.success(null) }
+          .onFailure { result.error("VIEW_ANNOTATION_ERROR", it.message, null) }
+      }
+      "viewAnnotation#update" -> {
+        val id = call.argument<String>("id")!!
+        val latitude = call.argument<Double>("latitude")
+        val longitude = call.argument<Double>("longitude")
+        val data = call.argument<Map<String, Any?>>("data")
+
+        viewAnnotationController.update(id, latitude, longitude, data)
+          .onSuccess { result.success(null) }
+          .onFailure { result.error("VIEW_ANNOTATION_ERROR", it.message, null) }
+      }
+      "viewAnnotation#remove" -> {
+        val id = call.argument<String>("id")!!
+        viewAnnotationController.remove(id)
+          .onSuccess { result.success(null) }
+          .onFailure { result.error("VIEW_ANNOTATION_ERROR", it.message, null) }
+      }
+      "viewAnnotation#removeAll" -> {
+        viewAnnotationController.removeAll()
+        result.success(null)
       }
       else -> {
         result.notImplemented()

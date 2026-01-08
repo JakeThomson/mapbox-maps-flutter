@@ -876,6 +876,90 @@ class MapboxMap extends ChangeNotifier {
               binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
               channelSuffix: _mapboxMapsPlatform.channelSuffix)
           .setCustomHeaders(headers);
+
+  /// Adds a native view annotation to the map at the specified coordinate.
+  ///
+  /// View annotations are native platform views (Android XML layouts or iOS UIViews)
+  /// that are anchored to a geographic coordinate and move with the map.
+  ///
+  /// **Android**: The [layoutName] should match an XML layout file name in your app's
+  /// `android/app/src/main/res/layout/` directory (without the `.xml` extension).
+  ///
+  /// **iOS**: The [layoutName] should match a view identifier registered via
+  /// `ViewAnnotationRegistry.shared.register()` in your `AppDelegate.swift`.
+  ///
+  /// The [data] map can contain key-value pairs that will be bound to views:
+  /// - On Android: Keys should match view IDs in your layout (e.g., `"callout_label"`)
+  /// - On iOS: The entire data map is passed to your registered view factory
+  /// - Special key `"backgroundColor"` sets the background color (as an integer color value)
+  ///
+  /// Example:
+  /// ```dart
+  /// await mapboxMap.addViewAnnotation(
+  ///   id: 'poi-1',
+  ///   layoutName: 'custom_callout',
+  ///   coordinate: Point(coordinates: Position(-122.4194, 37.7749)),
+  ///   data: {
+  ///     'callout_emoji': '☕',
+  ///     'callout_label': 'Blue Bottle Coffee',
+  ///     'backgroundColor': Colors.blue.value,
+  ///   },
+  /// );
+  /// ```
+  Future<void> addViewAnnotation({
+    required String id,
+    required String layoutName,
+    required Point coordinate,
+    Map<String, dynamic>? data,
+    ViewAnnotationAnchor anchor = ViewAnnotationAnchor.CENTER,
+    bool allowOverlap = true,
+  }) {
+    return _mapboxMapsPlatform._channel.invokeMethod(
+      'viewAnnotation#add',
+      <String, dynamic>{
+        'id': id,
+        'layoutName': layoutName,
+        'latitude': coordinate.coordinates.lat.toDouble(),
+        'longitude': coordinate.coordinates.lng.toDouble(),
+        'data': data,
+        'anchor': anchor.name,
+        'allowOverlap': allowOverlap,
+      },
+    );
+  }
+
+  /// Updates an existing view annotation.
+  ///
+  /// You can update the coordinate and/or the data bound to the view.
+  /// Only provided parameters will be updated.
+  Future<void> updateViewAnnotation({
+    required String id,
+    Point? coordinate,
+    Map<String, dynamic>? data,
+  }) {
+    return _mapboxMapsPlatform._channel.invokeMethod(
+      'viewAnnotation#update',
+      <String, dynamic>{
+        'id': id,
+        if (coordinate != null) 'latitude': coordinate.coordinates.lat.toDouble(),
+        if (coordinate != null) 'longitude': coordinate.coordinates.lng.toDouble(),
+        'data': data,
+      },
+    );
+  }
+
+  /// Removes a view annotation with the specified [id].
+  Future<void> removeViewAnnotation(String id) {
+    return _mapboxMapsPlatform._channel.invokeMethod(
+      'viewAnnotation#remove',
+      <String, dynamic>{'id': id},
+    );
+  }
+
+  /// Removes all view annotations from the map.
+  Future<void> removeAllViewAnnotations() {
+    return _mapboxMapsPlatform._channel.invokeMethod('viewAnnotation#removeAll');
+  }
 }
 
 class _GestureListener extends GestureListener {
