@@ -1,17 +1,112 @@
+import SwiftUI
 import UIKit
 
+// MARK: - View Model
+class CalloutViewModel: ObservableObject {
+    @Published var emoji: String = ""
+    @Published var selected: Bool = false
+}
+
+// MARK: - SwiftUI View
+struct CalloutViewContent: View {
+    @ObservedObject var viewModel: CalloutViewModel
+    
+    // Constants
+    private let smallSize: CGFloat = 32
+    private let largeSize: CGFloat = 48
+    private let arrowHeight: CGFloat = 10
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                // 1. Background Circle
+                Circle()
+                    .fill(Color.white)
+                    // We define the frame explicitly here so SwiftUI controls the animation curve
+                    // regardless of what the UIKit parent frame does.
+                    .frame(
+                        width: viewModel.selected ? largeSize : smallSize,
+                        height: viewModel.selected ? largeSize : smallSize
+                    )
+                    // Animate the border specifically
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.black, lineWidth: viewModel.selected ? 4 : 0)
+                    )
+                    // Shadow for depth (optional, matches map marker style)
+                    .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+                
+                // 2. Emoji Label
+                Text(viewModel.emoji)
+                    // Trick: Set font to the LARGEST size, then scale down.
+                    // This prevents pixelation and allows smooth animation.
+                    .font(.system(size: 28))
+                    .scaleEffect(viewModel.selected ? 1.0 : (24/28))
+                    .foregroundColor(.black)
+            }
+            // Ensure the ZStack stays on top of the arrow visually
+            .zIndex(1) 
+            
+            // 3. Arrow Indicator
+            Triangle()
+                .fill(Color.black)
+                .frame(width: 16, height: arrowHeight)
+                // Instead of if/else, we keep it in the hierarchy and animate props
+                .opacity(viewModel.selected ? 1 : 0)
+                .offset(y: viewModel.selected ? 0 : -10) // Slide up into the circle when hiding
+                .frame(height: viewModel.selected ? arrowHeight : 0) // Collapse space
+                .zIndex(0)
+        }
+        // This is the magic sauce:
+        // We allow the content to exceed the bounds during animation if needed
+        .compositingGroup() 
+        .animation(.spring(response: 0.4, dampingFraction: 0.6), value: viewModel.selected)
+    }
+}
+
+// MARK: - Triangle Shape
+struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+// MARK: - UIKit Wrapper
 class CalloutView: UIView {
-    private let emojiLabel = UILabel()
-    private let textLabel = UILabel()
-    private let containerStack = UIStackView()
     
-    var emoji: String? {
-        didSet { emojiLabel.text = emoji }
+    private let viewModel = CalloutViewModel()
+    private var hostingController: UIHostingController<CalloutViewContent>?
+    
+    // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
+    @objc dynamic var emoji: String? {
+        didSet { viewModel.emoji = emoji ?? "" }
     }
     
-    var label: String? {
-        didSet { textLabel.text = label }
+    // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
+    @objc dynamic var selected: Bool = false {
+        didSet {
+            // 1. Trigger SwiftUI Animation (handles internal circle growth, border, arrow)
+            withAnimation {
+                viewModel.selected = selected
+            }
+            
+            // 2. Animate the Mapbox Container Frame
+            // Mapbox ViewAnnotations are just UIViews. We need to animate the layout update
+            // to smooth out the frame resize (32px -> 48px) so it doesn't clip during animation.
+            UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0, options: [], animations: {
+                self.invalidateIntrinsicContentSize()
+                self.superview?.layoutIfNeeded()
+            }, completion: nil)
+        }
     }
+    
+    // Keep for compatibility, but not used
+    @objc dynamic var label: String?
     
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -23,61 +118,38 @@ class CalloutView: UIView {
         setupView()
     }
     
-    convenience init(emoji: String?, label: String?, backgroundColor: UIColor?) {
-        self.init(frame: .zero)
-        self.emoji = emoji
-        self.label = label
-        if let bgColor = backgroundColor {
-            self.backgroundColor = bgColor
-        }
-    }
-    
     private func setupView() {
-        backgroundColor = UIColor(red: 59/255, green: 130/255, blue: 246/255, alpha: 1.0)
-        layer.cornerRadius = 8
-        clipsToBounds = true
+        backgroundColor = .clear
+        clipsToBounds = false
         
-        containerStack.axis = .horizontal
-        containerStack.spacing = 8
-        containerStack.alignment = .center
-        containerStack.translatesAutoresizingMaskIntoConstraints = false
+        let contentView = CalloutViewContent(viewModel: viewModel)
+        let hostingController = UIHostingController(rootView: contentView)
+        hostingController.view.backgroundColor = .clear
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         
-        emojiLabel.font = UIFont.systemFont(ofSize: 24)
-        emojiLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        textLabel.font = UIFont.systemFont(ofSize: 14)
-        textLabel.textColor = .white
-        textLabel.numberOfLines = 1
-        textLabel.lineBreakMode = .byTruncatingTail
-        textLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        containerStack.addArrangedSubview(emojiLabel)
-        containerStack.addArrangedSubview(textLabel)
-        addSubview(containerStack)
+        addSubview(hostingController.view)
         
         NSLayoutConstraint.activate([
-            containerStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            textLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 200)
+            hostingController.view.centerXAnchor.constraint(equalTo: centerXAnchor),
+            hostingController.view.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Allow the hosting view to grow/shrink with intrinsic content size
+            hostingController.view.widthAnchor.constraint(equalTo: widthAnchor),
+            hostingController.view.heightAnchor.constraint(equalTo: heightAnchor)
         ])
+        
+        self.hostingController = hostingController
     }
     
     override var intrinsicContentSize: CGSize {
-        let stackSize = containerStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-        return CGSize(width: stackSize.width + 24, height: stackSize.height + 24)
+        // Calculate exact size needed so the Map SDK allocates the right hit-box
+        let circleSize: CGFloat = selected ? 48 : 32
+        let arrowHeight: CGFloat = selected ? 10 : 0
+        return CGSize(width: circleSize, height: circleSize + arrowHeight)
+    }
+    
+    // Pass hit tests through to the subviews
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let view = super.hitTest(point, with: event)
+        return view == self ? nil : view
     }
 }
-
-extension UIColor {
-    convenience init(rgb: Int) {
-        self.init(
-            red: CGFloat((rgb >> 16) & 0xFF) / 255.0,
-            green: CGFloat((rgb >> 8) & 0xFF) / 255.0,
-            blue: CGFloat(rgb & 0xFF) / 255.0,
-            alpha: 1.0
-        )
-    }
-}
-

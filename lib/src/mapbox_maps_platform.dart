@@ -7,12 +7,18 @@ class _MapboxMapsPlatform {
       'plugins.flutter.io.${channelSuffix.toString()}',
       const StandardMethodCodec(),
       binaryMessenger);
+  late final MethodChannel _viewAnnotationTapChannel = MethodChannel(
+      'plugins.flutter.io.${channelSuffix.toString()}/viewAnnotationTap',
+      const StandardMethodCodec(),
+      binaryMessenger);
   final BinaryMessenger binaryMessenger;
   final int channelSuffix;
+  Function(String, Map<String, dynamic>)? onViewAnnotationTap;
 
   _MapboxMapsPlatform(
       {required this.binaryMessenger, required this.channelSuffix}) {
     _channel.setMethodCallHandler(_handleMethodCall);
+    _viewAnnotationTapChannel.setMethodCallHandler(_handleViewAnnotationTap);
   }
 
   _MapboxMapsPlatform.instance(int channelSuffix)
@@ -23,6 +29,19 @@ class _MapboxMapsPlatform {
   Future<dynamic> _handleMethodCall(MethodCall call) async {
     print(
         "Handle method call ${call.method}, arguments: ${call.arguments} not supported");
+  }
+
+  Future<dynamic> _handleViewAnnotationTap(MethodCall call) async {
+    if (call.method == "onTap" && call.arguments is Map) {
+      final args = call.arguments as Map;
+      final id = args['id'] as String?;
+      final data = args['data'] as Map<dynamic, dynamic>?;
+      if (id != null && onViewAnnotationTap != null) {
+        // Convert Map<dynamic, dynamic> to Map<String, dynamic>
+        final dataMap = data?.map((key, value) => MapEntry(key.toString(), value)) ?? <String, dynamic>{};
+        onViewAnnotationTap!(id, dataMap);
+      }
+    }
   }
 
   Widget buildView(

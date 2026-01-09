@@ -9,6 +9,8 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.MethodChannel
 import androidx.compose.runtime.Recomposer
 import androidx.compose.ui.platform.AndroidUiDispatcher
 import androidx.compose.ui.platform.ComposeView
@@ -32,16 +34,23 @@ import com.mapbox.maps.viewannotation.ViewAnnotationManager
 import com.mapbox.maps.viewannotation.viewAnnotationOptions
 import com.mapbox.maps.viewannotation.*
 
-class ViewAnnotationController(private val mapView: MapView) {
+class ViewAnnotationController(
+    private val mapView: MapView,
+    private val messenger: BinaryMessenger,
+    private val channelSuffix: String
+) {
     companion object {
         private const val TAG = "ViewAnnotationController"
     }
     
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
+    private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
+    
+    private val tapEventChannel = MethodChannel(messenger, "plugins.flutter.io.$channelSuffix/viewAnnotationTap")
     
     private val composeLifecycleOwner = ComposeLifecycleOwner()
     private val coroutineScope = CoroutineScope(AndroidUiDispatcher.Main)
@@ -127,6 +136,16 @@ class ViewAnnotationController(private val mapView: MapView) {
                 container.visibility = View.VISIBLE
                 
                 if (annotations.containsKey(id)) {
+                    // Add click listener to handle taps
+                    container.setOnClickListener {
+                        Log.d(TAG, "[$id] View annotation tapped")
+                        val data = annotationData[id] ?: emptyMap()
+                        tapEventChannel.invokeMethod("onTap", mapOf(
+                            "id" to id,
+                            "data" to data
+                        ))
+                    }
+                    
                     val options = viewAnnotationOptions {
                         geometry(Point.fromLngLat(longitude, latitude))
                         allowOverlap(allowOverlap)
@@ -154,6 +173,9 @@ class ViewAnnotationController(private val mapView: MapView) {
             ?: return Result.failure(Exception("Annotation with id '$id' not found"))
 
         if (data != null && view is FrameLayout) {
+            // Update stored data
+            annotationData[id] = data
+            
             val composeView = view.getChildAt(0) as? ComposeView
             if (composeView != null) {
                 val layoutName = layoutNames[id]
@@ -183,6 +205,7 @@ class ViewAnnotationController(private val mapView: MapView) {
             ?: return Result.failure(Exception("Annotation with id '$id' not found"))
 
         layoutNames.remove(id)
+        annotationData.remove(id)
         viewAnnotationManager.removeViewAnnotation(view)
         return Result.success(Unit)
     }
@@ -193,6 +216,7 @@ class ViewAnnotationController(private val mapView: MapView) {
         }
         annotations.clear()
         layoutNames.clear()
+        annotationData.clear()
     }
 
     private fun parseAnchor(anchor: String?): ViewAnnotationAnchor {

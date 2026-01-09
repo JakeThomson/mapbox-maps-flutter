@@ -15,11 +15,10 @@ import Flutter
           if let emoji = args?["callout_emoji"] as? String {
               view.emoji = emoji
           }
-          if let label = args?["callout_label"] as? String {
-              view.label = label
-          }
-          if let colorValue = args?["backgroundColor"] as? Int {
-              view.backgroundColor = UIColor(rgb: colorValue)
+          // Background is always white (set in CalloutView.setupView) to match Android
+          // Don't override backgroundColor here
+          if let selected = args?["selected"] as? Bool {
+              view.selected = selected
           }
           view.sizeToFit()
           return view

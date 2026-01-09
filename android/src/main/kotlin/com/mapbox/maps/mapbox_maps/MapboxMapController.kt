@@ -210,7 +210,7 @@ class MapboxMapController(
     viewportController = ViewportController(mapView.viewport, mapView.camera, context, mapboxMap)
     performanceStatisticsController = PerformanceStatisticsController(mapboxMap, this.messenger, this.channelSuffix)
     mapRecorderController = MapRecorderController(mapboxMap)
-    viewAnnotationController = ViewAnnotationController(mapView)
+    viewAnnotationController = ViewAnnotationController(mapView, this.messenger, this.channelSuffix)
     changeUserAgent(pluginVersion)
 
     StyleManager.setUp(messenger, styleController, this.channelSuffix)

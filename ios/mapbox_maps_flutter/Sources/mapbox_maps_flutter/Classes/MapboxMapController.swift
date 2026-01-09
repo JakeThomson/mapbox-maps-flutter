@@ -71,7 +71,11 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
 
         interactionsController = InteractionsController(withMapView: mapView)
         
-        viewAnnotationController = ViewAnnotationController(mapView: mapView)
+        viewAnnotationController = ViewAnnotationController(
+            mapView: mapView,
+            messenger: binaryMessenger.messenger,
+            channelSuffix: binaryMessenger.suffix
+        )
 
         let logoController = LogoController(withMapView: mapView)
         LogoSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: logoController, messageChannelSuffix: binaryMessenger.suffix)

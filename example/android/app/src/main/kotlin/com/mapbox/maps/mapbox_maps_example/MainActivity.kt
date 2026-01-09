@@ -15,7 +15,8 @@ class MainActivity: FlutterActivity() {
                 label = data["callout_label"] as? String ?: "",
                 backgroundColor = (data["backgroundColor"] as? Number)?.let { 
                     Color(it.toLong().toInt()) 
-                } ?: Color(0xFF3B82F6)
+                } ?: Color(0xFF3B82F6),
+                selected = (data["selected"] as? Boolean) ?: false
             )
         }
     }

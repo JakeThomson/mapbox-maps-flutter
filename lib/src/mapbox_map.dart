@@ -255,6 +255,17 @@ class MapboxMap extends ChangeNotifier {
   OnMapScrollListener? onMapScrollListener;
   OnMapZoomListener? onMapZoomListener;
 
+  /// Callback invoked when a view annotation is tapped.
+  /// The [id] parameter is the identifier of the tapped view annotation.
+  /// The [data] parameter contains all the data that was used to render the annotation.
+  void Function(String id, Map<String, dynamic> data)? onViewAnnotationTap;
+
+  /// Set the callback for view annotation taps.
+  void setOnViewAnnotationTapListener(void Function(String id, Map<String, dynamic> data)? listener) {
+    onViewAnnotationTap = listener;
+    _mapboxMapsPlatform.onViewAnnotationTap = listener;
+  }
+
   @override
   void dispose() {
     _mapboxMapsPlatform.dispose();
@@ -892,6 +903,7 @@ class MapboxMap extends ChangeNotifier {
   /// - On Android: Keys should match view IDs in your layout (e.g., `"callout_label"`)
   /// - On iOS: The entire data map is passed to your registered view factory
   /// - Special key `"backgroundColor"` sets the background color (as an integer color value)
+  /// - Special key `"selected"` sets the selected state (as a boolean)
   ///
   /// Example:
   /// ```dart
@@ -903,6 +915,7 @@ class MapboxMap extends ChangeNotifier {
   ///     'callout_emoji': '☕',
   ///     'callout_label': 'Blue Bottle Coffee',
   ///     'backgroundColor': Colors.blue.value,
+  ///     'selected': false,
   ///   },
   /// );
   /// ```
