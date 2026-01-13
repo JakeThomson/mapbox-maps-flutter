@@ -15,6 +15,7 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
     private let gesturesController: GesturesController?
     private let interactionsController: InteractionsController?
     private let viewAnnotationController: ViewAnnotationController
+    private var viewLayerController: ViewLayerController?
     private let eventHandler: MapboxEventHandler
     private let binaryMessenger: SuffixBinaryMessenger
 
@@ -77,6 +78,13 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
             channelSuffix: binaryMessenger.suffix
         )
 
+        viewLayerController = ViewLayerController(
+            mapView: mapView,
+            viewAnnotationController: viewAnnotationController,
+            messenger: binaryMessenger.messenger,
+            channelSuffix: binaryMessenger.suffix
+        )
+
         let logoController = LogoController(withMapView: mapView)
         LogoSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: logoController, messageChannelSuffix: binaryMessenger.suffix)
 
@@ -119,6 +127,10 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
         super.init()
 
         channel.setMethodCallHandler { [weak self] in self?.onMethodCall(methodCall: $0, result: $1) }
+    }
+
+    deinit {
+        viewLayerController?.dispose()
     }
 
     func onMethodCall(methodCall: FlutterMethodCall, result: @escaping FlutterResult) {

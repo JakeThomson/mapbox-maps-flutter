@@ -242,20 +242,91 @@ abstract class Source {
 extension StyleLayer on StyleManager {
   /// Add a layer the the current style.
   Future<void> addLayer(Layer layer) async {
+    // ViewLayer requires special handling as it's not a native Mapbox layer type
+    if (layer is ViewLayer) {
+      return _addViewLayer(layer);
+    }
+
     var encode = await layer._encode();
     return addStyleLayer(encode, null);
   }
 
+  /// Handles adding a ViewLayer which creates view annotations for visible features
+  Future<void> _addViewLayer(ViewLayer layer) async {
+    var encode = await layer._encode();
+
+    // Create a method channel for ViewLayer-specific operations
+    final channel = BasicMessageChannel<Object?>(
+      'dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.addViewLayer$pigeonVar_messageChannelSuffix',
+      const StandardMessageCodec(),
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+
+    final Map<Object?, Object?>? replyMap =
+        await channel.send(<Object?>[encode]) as Map<Object?, Object?>?;
+    if (replyMap == null) {
+      throw PlatformException(
+        code: 'channel-error',
+        message: 'Unable to establish connection on channel.',
+      );
+    } else if (replyMap['error'] != null) {
+      final Map<Object?, Object?> error =
+          (replyMap['error'] as Map<Object?, Object?>?)!;
+      throw PlatformException(
+        code: (error['code'] as String?)!,
+        message: error['message'] as String?,
+        details: error['details'],
+      );
+    }
+  }
+
   /// Add a layer to the current style in a specific position.
   Future<void> addLayerAt(Layer layer, LayerPosition position) async {
+    if (layer is ViewLayer) {
+      // ViewLayer doesn't support positioning yet - add at default position
+      return _addViewLayer(layer);
+    }
+
     var encode = await layer._encode();
     return addStyleLayer(encode, position);
   }
 
   /// Update an existing layer in the style.
   Future<void> updateLayer(Layer layer) async {
+    if (layer is ViewLayer) {
+      return _updateViewLayer(layer);
+    }
+
     var encode = await layer._encode();
     return setStyleLayerProperties(layer.id, encode);
+  }
+
+  /// Updates an existing ViewLayer
+  Future<void> _updateViewLayer(ViewLayer layer) async {
+    var encode = await layer._encode();
+
+    final channel = BasicMessageChannel<Object?>(
+      'dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.updateViewLayer$pigeonVar_messageChannelSuffix',
+      const StandardMessageCodec(),
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+
+    final Map<Object?, Object?>? replyMap =
+        await channel.send(<Object?>[encode]) as Map<Object?, Object?>?;
+    if (replyMap == null) {
+      throw PlatformException(
+        code: 'channel-error',
+        message: 'Unable to establish connection on channel.',
+      );
+    } else if (replyMap['error'] != null) {
+      final Map<Object?, Object?> error =
+          (replyMap['error'] as Map<Object?, Object?>?)!;
+      throw PlatformException(
+        code: (error['code'] as String?)!,
+        message: error['message'] as String?,
+        details: error['details'],
+      );
+    }
   }
 
   /// Get a previously added layer from the current style.
@@ -311,6 +382,9 @@ extension StyleLayer on StyleManager {
         break;
       case "clip":
         layer = ClipLayer.decode(properties);
+        break;
+      case "view":
+        layer = ViewLayer.decode(properties);
         break;
       default:
         print("Layer type: $type unknown.");

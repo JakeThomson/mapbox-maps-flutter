@@ -125,6 +125,7 @@ class MapboxMapController(
   private val performanceStatisticsController: PerformanceStatisticsController
   private val mapRecorderController: MapRecorderController
   private val viewAnnotationController: ViewAnnotationController
+  private lateinit var viewLayerController: ViewLayerController
 
   private val eventHandler: MapboxEventHandler
 
@@ -211,6 +212,7 @@ class MapboxMapController(
     performanceStatisticsController = PerformanceStatisticsController(mapboxMap, this.messenger, this.channelSuffix)
     mapRecorderController = MapRecorderController(mapboxMap)
     viewAnnotationController = ViewAnnotationController(mapView, this.messenger, this.channelSuffix)
+    viewLayerController = ViewLayerController(mapView, mapboxMap, viewAnnotationController, this.messenger, this.channelSuffix.toString())
     changeUserAgent(pluginVersion)
 
     StyleManager.setUp(messenger, styleController, this.channelSuffix)
@@ -272,6 +274,7 @@ class MapboxMapController(
       return
     }
 
+    viewLayerController.dispose()
     eventHandler.dispose()
     lifecycleHelper?.dispose()
     lifecycleHelper = null
