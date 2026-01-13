@@ -346,10 +346,12 @@ class ViewAnnotationController {
     
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard let annotationId = objc_getAssociatedObject(gesture, &AssociatedKeys.annotationId) as? String else {
+            os_log("🔴 TAP GESTURE FIRED but no annotation ID found!", log: logger, type: .error)
             return
         }
-        os_log("[%{public}@] View annotation tapped", log: logger, type: .info, annotationId)
         let data = annotationData[annotationId] ?? [:]
+        os_log("🎯 IOS TAP DETECTED! ID: %{public}@, Data: %{public}@", log: logger, type: .info, annotationId, String(describing: data))
+        os_log("🎯 Invoking Flutter method channel...", log: logger, type: .info)
         tapEventChannel.invokeMethod("onTap", arguments: ["id": annotationId, "data": data])
     }
 }

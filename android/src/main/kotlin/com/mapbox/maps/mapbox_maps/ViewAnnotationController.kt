@@ -104,6 +104,17 @@ class ViewAnnotationController(
         // Store references before async operation
         annotations[id] = container
         layoutNames[id] = layoutName
+        annotationData[id] = data ?: emptyMap()
+
+        // Set click listener immediately (before any async work)
+        container.setOnClickListener {
+            Log.d(TAG, "[$id] View annotation tapped")
+            val tapData = annotationData[id] ?: emptyMap()
+            tapEventChannel.invokeMethod("onTap", mapOf(
+                "id" to id,
+                "data" to tapData
+            ))
+        }
 
         // Get the activity's root view to temporarily attach our view
         val activity = findActivity(context)
@@ -136,16 +147,6 @@ class ViewAnnotationController(
                 container.visibility = View.VISIBLE
                 
                 if (annotations.containsKey(id)) {
-                    // Add click listener to handle taps
-                    container.setOnClickListener {
-                        Log.d(TAG, "[$id] View annotation tapped")
-                        val data = annotationData[id] ?: emptyMap()
-                        tapEventChannel.invokeMethod("onTap", mapOf(
-                            "id" to id,
-                            "data" to data
-                        ))
-                    }
-                    
                     val options = viewAnnotationOptions {
                         geometry(Point.fromLngLat(longitude, latitude))
                         allowOverlap(allowOverlap)

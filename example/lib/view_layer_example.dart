@@ -17,12 +17,24 @@ class ViewLayerExample extends StatefulWidget implements Example {
 class ViewLayerExampleState extends State<ViewLayerExample> {
   MapboxMap? mapboxMap;
   final Map<String, bool> _selectedAnnotations = {};
-void onMapCreated(MapboxMap mapboxMap) async {
+  void onMapCreated(MapboxMap mapboxMap) async {
+    this.mapboxMap = mapboxMap;
+
     mapboxMap.logo.updateSettings(LogoSettings(enabled: false));
     mapboxMap.attribution.updateSettings(AttributionSettings(enabled: false));
     mapboxMap.gestures.updateSettings(
       GesturesSettings(doubleTapToZoomInEnabled: true),
     );
+
+    // Set up tap listener for view annotations
+    print('=== SETTING UP VIEW ANNOTATION TAP LISTENER ===');
+    mapboxMap
+        .setOnViewAnnotationTapListener((String id, Map<String, dynamic> data) {
+      print('🎯🎯🎯 TAP DETECTED IN FLUTTER! 🎯🎯🎯');
+      print('   Annotation ID: $id');
+      print('   Data: $data');
+      _toggleSelection(id);
+    });
 
     try {
       await Future.delayed(const Duration(milliseconds: 500));
@@ -40,10 +52,10 @@ void onMapCreated(MapboxMap mapboxMap) async {
 
       await mapboxMap.style.addLayer(
         CircleLayer(
-            id: "test-poi-circle-right",
-            sourceId: "test-poi-source",
-            sourceLayer: "places_layer",
-          )
+          id: "test-poi-circle-right",
+          sourceId: "test-poi-source",
+          sourceLayer: "places_layer",
+        )
           ..circleColor = Colors.blueAccent.value
           ..circleRadius = 6.0
           ..circleStrokeColor = Colors.white.value
@@ -54,10 +66,10 @@ void onMapCreated(MapboxMap mapboxMap) async {
       // 2. Add the Symbol Layer (Icon + Conditional Text)
       await mapboxMap.style.addLayer(
         SymbolLayer(
-            id: "test-poi-layer",
-            sourceId: "test-poi-source",
-            sourceLayer: "places_layer",
-          )
+          id: "test-poi-layer",
+          sourceId: "test-poi-source",
+          sourceLayer: "places_layer",
+        )
           ..textField = "{title}"
           ..textOffset = [1.5, 0.0]
           ..textAnchor = TextAnchor.LEFT
@@ -67,12 +79,9 @@ void onMapCreated(MapboxMap mapboxMap) async {
           ..textHaloColor = Colors.white.value
           ..textHaloWidth = 1.0
           // VISIBILITY LOGIC:
-          ..textOptional =
-              true // Hide text if it collides, keep icon
-          ..textAllowOverlap =
-              false // Collision detection for text
-          ..iconAllowOverlap =
-              true // Icon is always visible
+          ..textOptional = true // Hide text if it collides, keep icon
+          ..textAllowOverlap = false // Collision detection for text
+          ..iconAllowOverlap = true // Icon is always visible
           ..iconIgnorePlacement = true, // map labels won't hide your icon
       );
 
@@ -82,8 +91,7 @@ void onMapCreated(MapboxMap mapboxMap) async {
           context,
         ) {
           final properties = feature.properties;
-          final id =
-              properties['id']?.toString() ??
+          final id = properties['id']?.toString() ??
               properties['ID']?.toString() ??
               feature.id?.toString() ??
               'Unknown';
@@ -92,9 +100,7 @@ void onMapCreated(MapboxMap mapboxMap) async {
         interactionID: "labelTapInteraction",
       );
 
-
-    await mapboxMap.style.addLayer(
-      ViewLayer(
+      await mapboxMap.style.addLayer(ViewLayer(
         id: "test-poi-view-layer",
         sourceId: "test-poi-source",
         sourceLayer: "places_layer",
@@ -109,9 +115,7 @@ void onMapCreated(MapboxMap mapboxMap) async {
         },
         anchor: ViewAnnotationAnchor.BOTTOM,
         allowOverlap: true,
-        minZoom: 10,
-      )
-    );
+      ));
 
       mapboxMap.addInteraction(
         TapInteraction(FeaturesetDescriptor(layerId: "test-poi-circle-right"), (
@@ -119,8 +123,7 @@ void onMapCreated(MapboxMap mapboxMap) async {
           context,
         ) {
           final properties = feature.properties;
-          final id =
-              properties['id']?.toString() ??
+          final id = properties['id']?.toString() ??
               properties['ID']?.toString() ??
               feature.id?.toString() ??
               'Unknown';
@@ -129,10 +132,10 @@ void onMapCreated(MapboxMap mapboxMap) async {
         interactionID: "circleTapInteraction",
       );
 
-
-    mapboxMap.setOnViewAnnotationTapListener((String id, Map<String, dynamic> data) {
-      _toggleSelection(id);
-    });
+      mapboxMap.setOnViewAnnotationTapListener(
+          (String id, Map<String, dynamic> data) {
+        _toggleSelection(id);
+      });
     } catch (e) {
       print('Error adding source/layer: $e');
     }
