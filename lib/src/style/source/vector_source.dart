@@ -20,6 +20,7 @@ class VectorSource extends Source {
     double? maxOverscaleFactorForParentTiles,
     double? tileRequestsDelay,
     double? tileNetworkRequestsDelay,
+    Object? promoteId,
   }) : super(id: id) {
     _url = url;
     _tiles = tiles;
@@ -35,6 +36,7 @@ class VectorSource extends Source {
     _maxOverscaleFactorForParentTiles = maxOverscaleFactorForParentTiles;
     _tileRequestsDelay = tileRequestsDelay;
     _tileNetworkRequestsDelay = tileNetworkRequestsDelay;
+    _promoteId = promoteId;
   }
 
   @override
@@ -234,6 +236,16 @@ class VectorSource extends Source {
 
   double? _tileNetworkRequestsDelay;
 
+  Object? _promoteId;
+
+  /// A property to use as a feature id (for feature state).
+  /// Either a property name (String), or an object of the form
+  /// `{<sourceLayer>: <propertyName>, ...}` for vector sources with multiple source layers.
+  ///
+  /// This is useful when you need feature IDs to be strings (e.g., for layer feature binding
+  /// with view annotations) instead of the native MVT numeric IDs which may have precision issues.
+  Object? get promoteId => _promoteId;
+
   /// For the tiled sources, this property sets the tile network requests delay. The given delay comes in action only during an ongoing animation or gestures. It helps to avoid loading the transient tiles from the network and thus to avoid redundant network requests. Note that tile-network-requests-delay value is superseded with tile-requests-delay property value, if both are provided.
   /// Default value: 0.
   Future<double?> get tileNetworkRequestsDelay async {
@@ -298,6 +310,9 @@ class VectorSource extends Source {
       }
       if (_volatile != null) {
         properties["volatile"] = _volatile;
+      }
+      if (_promoteId != null) {
+        properties["promoteId"] = _promoteId;
       }
     }
 

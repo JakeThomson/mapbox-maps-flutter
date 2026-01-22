@@ -170,8 +170,7 @@ final class StyleController: StyleManager {
 
     func addStyleSource(sourceId: String, properties: String, completion: @escaping (Result<Void, Error>) -> Void) {
         do {
-            try styleManager.addSource(withId: sourceId,
-                                          properties: convertStringToDictionary(properties: properties))
+            try styleManager.addSource(withId: sourceId, properties: propertiesDict)
             completion(.success(()))
         } catch {
             completion(.failure(FlutterError(code: StyleController.errorCode, message: error.localizedDescription, details: nil)))

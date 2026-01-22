@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -39,10 +38,6 @@ class ViewAnnotationController(
     private val messenger: BinaryMessenger,
     private val channelSuffix: String
 ) {
-    companion object {
-        private const val TAG = "ViewAnnotationController"
-    }
-    
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
@@ -109,7 +104,6 @@ class ViewAnnotationController(
 
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
-            Log.d(TAG, "[$id] View annotation tapped")
             val tapData = annotationData[id] ?: emptyMap()
             tapEventChannel.invokeMethod("onTap", mapOf(
                 "id" to id,
@@ -119,19 +113,14 @@ class ViewAnnotationController(
 
         // Get the activity's root view to temporarily attach our view
         val activity = findActivity(context)
-        if (activity == null) {
-            Log.e(TAG, "[$id] Could not find Activity from context")
-            return Result.failure(Exception("Could not find Activity from context"))
-        }
-        
+            ?: return Result.failure(Exception("Could not find Activity from context"))
+
         val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
-        
+
         // Temporarily add to window (invisible) so ComposeView can attach and compose
         container.visibility = View.INVISIBLE
         rootView.addView(container)
-        
-        Log.d(TAG, "[$id] Temporarily attached to window, setting content")
-        
+
         composeView.setContent {
             factory(data ?: emptyMap())
         }
@@ -139,14 +128,10 @@ class ViewAnnotationController(
         // Wait for composition and layout
         composeView.post {
             composeView.post {
-                Log.d(TAG, "[$id] After posts - container: ${container.width}x${container.height}, composeView: ${composeView.width}x${composeView.height}")
-                Log.d(TAG, "[$id] Measured - container: ${container.measuredWidth}x${container.measuredHeight}, composeView: ${composeView.measuredWidth}x${composeView.measuredHeight}")
-                Log.d(TAG, "[$id] isAttachedToWindow: ${composeView.isAttachedToWindow}")
-                
                 // Remove from root view
                 rootView.removeView(container)
                 container.visibility = View.VISIBLE
-                
+
                 if (annotations.containsKey(id)) {
                     val options = viewAnnotationOptions {
                         geometry(Point.fromLngLat(longitude, latitude))
@@ -155,8 +140,7 @@ class ViewAnnotationController(
                             anchor(parseAnchor(anchor))
                         }
                     }
-                    
-                    Log.d(TAG, "[$id] Adding view annotation to map")
+
                     viewAnnotationManager.addViewAnnotation(container, options)
                 }
             }
@@ -213,7 +197,6 @@ class ViewAnnotationController(
 
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
-            Log.d(TAG, "[$id] View annotation tapped")
             val tapData = annotationData[id] ?: emptyMap()
             tapEventChannel.invokeMethod("onTap", mapOf(
                 "id" to id,
@@ -223,18 +206,13 @@ class ViewAnnotationController(
 
         // Get the activity's root view to temporarily attach our view
         val activity = findActivity(context)
-        if (activity == null) {
-            Log.e(TAG, "[$id] Could not find Activity from context")
-            return Result.failure(Exception("Could not find Activity from context"))
-        }
+            ?: return Result.failure(Exception("Could not find Activity from context"))
 
         val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
 
         // Temporarily add to window (invisible) so ComposeView can attach and compose
         container.visibility = View.INVISIBLE
         rootView.addView(container)
-
-        Log.d(TAG, "[$id] Temporarily attached to window, setting content for layer feature binding")
 
         composeView.setContent {
             factory(data ?: emptyMap())
@@ -243,8 +221,6 @@ class ViewAnnotationController(
         // Wait for composition and layout
         composeView.post {
             composeView.post {
-                Log.d(TAG, "[$id] After posts - container: ${container.width}x${container.height}, composeView: ${composeView.width}x${composeView.height}")
-
                 // Remove from root view
                 rootView.removeView(container)
                 container.visibility = View.VISIBLE
@@ -261,7 +237,6 @@ class ViewAnnotationController(
                         }
                     }
 
-                    Log.d(TAG, "[$id] Adding view annotation with layer feature binding to layer $associatedLayerId, feature $featureId")
                     viewAnnotationManager.addViewAnnotation(container, options)
                 }
             }

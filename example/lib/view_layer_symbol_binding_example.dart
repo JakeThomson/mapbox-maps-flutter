@@ -46,7 +46,8 @@ class ViewLayerSymbolBindingExampleState
 
     try {
       // Add the vector source with POI data
-      // NOTE: MVT tiles must include native feature IDs for symbol layer binding to work
+      // NOTE: Use promoteId to ensure feature IDs are treated as strings from the start,
+      // avoiding numeric conversion issues with large IDs in layer feature binding.
       await map.style.addSource(
         VectorSource(
           id: "test-poi-source",
@@ -55,6 +56,7 @@ class ViewLayerSymbolBindingExampleState
           ],
           minzoom: 0,
           maxzoom: 22,
+          // promoteId: {"places_layer": "id"},
         ),
       );
 
@@ -73,9 +75,9 @@ class ViewLayerSymbolBindingExampleState
           ..textColor = Colors.black.value
           ..textHaloColor = Colors.white.value
           ..textHaloWidth = 1.0
-          ..textOptional = true
+          ..textOptional = false
           ..textAllowOverlap = false
-          ..iconAllowOverlap = true,
+          ..iconAllowOverlap = false,
       );
 
       // STEP 2: Add the ViewLayer with symbol layer binding
@@ -91,7 +93,7 @@ class ViewLayerSymbolBindingExampleState
           'backgroundColor': ConstantValue(Colors.blueAccent.toARGB32()),
           'selected': ConstantValue(false),
         },
-        anchor: ViewAnnotationAnchor.BOTTOM,
+        anchor: ViewAnnotationAnchor.RIGHT,
         allowOverlap: true,
       ));
     } catch (e) {

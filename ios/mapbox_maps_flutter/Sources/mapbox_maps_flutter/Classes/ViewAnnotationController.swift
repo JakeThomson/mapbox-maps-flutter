@@ -1,5 +1,4 @@
 import UIKit
-import os.log
 import Flutter
 import ObjectiveC
 @_spi(Experimental) import MapboxMaps
@@ -15,7 +14,6 @@ class ViewAnnotationController {
     private var annotationOptions: [String: ViewAnnotationOptions] = [:]
     private var annotationData: [String: [String: Any]] = [:]
     private var viewAnnotationObjects: [String: ViewAnnotation] = [:]  // For layer feature binding
-    private let logger = OSLog(subsystem: "com.mapbox.maps.mapbox_maps", category: "ViewAnnotationController")
     private let tapEventChannel: FlutterMethodChannel
     
     init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
@@ -35,27 +33,21 @@ class ViewAnnotationController {
         anchor: String?,
         allowOverlap: Bool
     ) -> Result<Void, Error> {
-        os_log("[%{public}@] Starting add view annotation", log: logger, type: .info, id)
-        
         if annotations[id] != nil {
-            os_log("[%{public}@] ERROR: Annotation already exists", log: logger, type: .error, id)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Annotation with id '\(id)' already exists"]
             ))
         }
-        
+
         guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data) else {
-            os_log("[%{public}@] ERROR: No view registered for '%{public}@'", log: logger, type: .error, id, layoutName)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "No view registered for '\(layoutName)'"]
             ))
         }
-        
-        os_log("[%{public}@] View created: %{public}@", log: logger, type: .info, id, String(describing: type(of: view)))
         
         // Size the view
         let sizingResult = sizeView(view, id: id)
@@ -73,9 +65,7 @@ class ViewAnnotationController {
             allowOverlap: allowOverlap,
             anchor: parseAnchor(anchor)
         )
-        
-        os_log("[%{public}@] Adding view annotation to map with coordinate: (%f, %f)", log: logger, type: .info, id, latitude, longitude)
-        
+
         // Add tap gesture recognizer
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         view.addGestureRecognizer(tapGesture)
@@ -90,10 +80,8 @@ class ViewAnnotationController {
             layoutNames[id] = layoutName
             annotationOptions[id] = options
             annotationData[id] = data ?? [:]
-            os_log("[%{public}@] Successfully added view annotation", log: logger, type: .info, id)
             return .success(())
         } catch {
-            os_log("[%{public}@] ERROR: Failed to add view annotation: %{public}@", log: logger, type: .error, id, error.localizedDescription)
             return .failure(error)
         }
     }
@@ -109,10 +97,7 @@ class ViewAnnotationController {
         anchor: String?,
         allowOverlap: Bool
     ) -> Result<Void, Error> {
-        os_log("[%{public}@] Starting add view annotation with layer feature binding to layer %{public}@, feature %{public}@", log: logger, type: .info, id, associatedLayerId, featureId)
-
         if annotations[id] != nil {
-            os_log("[%{public}@] ERROR: Annotation already exists", log: logger, type: .error, id)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 1,
@@ -121,15 +106,12 @@ class ViewAnnotationController {
         }
 
         guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data) else {
-            os_log("[%{public}@] ERROR: No view registered for '%{public}@'", log: logger, type: .error, id, layoutName)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "No view registered for '\(layoutName)'"]
             ))
         }
-
-        os_log("[%{public}@] View created: %{public}@", log: logger, type: .info, id, String(describing: type(of: view)))
 
         // Size the view
         let sizingResult = sizeView(view, id: id)
@@ -163,15 +145,6 @@ class ViewAnnotationController {
         annotationData[id] = data ?? [:]
         viewAnnotationObjects[id] = annotation
 
-        // Debug: Check annotation state after adding
-        os_log("[%{public}@] ViewAnnotation state - allowOverlap: %{public}@, view.frame: %{public}@, view.isHidden: %{public}@, view.alpha: %{public}f",
-               log: logger, type: .info, id,
-               String(describing: annotation.allowOverlap),
-               String(describing: view.frame),
-               String(describing: view.isHidden),
-               view.alpha)
-
-        os_log("[%{public}@] Successfully added view annotation with layer feature binding", log: logger, type: .info, id)
         return .success(())
     }
 
@@ -247,9 +220,8 @@ class ViewAnnotationController {
             }
 
             // For ViewLayer annotations, if in-place update failed, we can't easily recreate
-            // because they're bound to features. Just return success with a warning.
+            // because they're bound to features. Just return success.
             if isViewLayerAnnotation {
-                os_log("[%{public}@] ViewLayer annotation view doesn't support in-place property updates", log: logger, type: .default, id)
                 annotationData[id] = data
                 return .success(())
             }
@@ -470,12 +442,9 @@ class ViewAnnotationController {
     
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard let annotationId = objc_getAssociatedObject(gesture, &AssociatedKeys.annotationId) as? String else {
-            os_log("🔴 TAP GESTURE FIRED but no annotation ID found!", log: logger, type: .error)
             return
         }
         let data = annotationData[annotationId] ?? [:]
-        os_log("🎯 IOS TAP DETECTED! ID: %{public}@, Data: %{public}@", log: logger, type: .info, annotationId, String(describing: data))
-        os_log("🎯 Invoking Flutter method channel...", log: logger, type: .info)
         tapEventChannel.invokeMethod("onTap", arguments: ["id": annotationId, "data": data])
     }
 }

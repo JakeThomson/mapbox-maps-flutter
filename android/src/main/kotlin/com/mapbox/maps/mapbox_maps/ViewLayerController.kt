@@ -2,7 +2,6 @@ package com.mapbox.maps.mapbox_maps
 
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import com.mapbox.geojson.Feature
 import com.mapbox.geojson.Point
 import com.mapbox.maps.CameraChangedCallback
@@ -44,7 +43,6 @@ class ViewLayerController(
     private val channelSuffix: String
 ) {
     companion object {
-        private const val TAG = "ViewLayerController"
         private const val DEBOUNCE_DELAY_MS = 150L
     }
 
@@ -80,13 +78,10 @@ class ViewLayerController(
                 viewLayers[config.id] = config
                 featureAnnotations[config.id] = mutableSetOf()
                 visibleFeatureIds[config.id] = mutableSetOf()
-
-                Log.d(TAG, "Added ViewLayer: ${config.id}")
                 scheduleUpdate()
 
                 reply.reply(emptyMap<String, Any>())
             } catch (e: Exception) {
-                Log.e(TAG, "Error adding ViewLayer", e)
                 reply.reply(mapOf("error" to mapOf(
                     "code" to "view_layer_error",
                     "message" to e.message
@@ -112,12 +107,10 @@ class ViewLayerController(
                 }
 
                 viewLayers[config.id] = config
-                Log.d(TAG, "Updated ViewLayer: ${config.id}")
                 scheduleUpdate()
 
                 reply.reply(emptyMap<String, Any>())
             } catch (e: Exception) {
-                Log.e(TAG, "Error updating ViewLayer", e)
                 reply.reply(mapOf("error" to mapOf(
                     "code" to "view_layer_error",
                     "message" to e.message
@@ -225,27 +218,11 @@ class ViewLayerController(
                 )
             )
 
-            Log.d(TAG, "queryFeaturesForLayer ${config.id}: bounds=(0,0,${mapView.width},${mapView.height}), sourceId=${config.sourceId}, sourceLayer=${config.sourceLayer}")
-
             mapboxMap.queryRenderedFeatures(screenBox, options) { expected ->
                 expected.value?.let { queriedFeatures ->
-                    Log.d(TAG, "queryRenderedFeatures returned ${queriedFeatures.size} total features for layer ${config.id}")
-
-                    // Log unique sources found
-                    val sourceCounts = mutableMapOf<String, Int>()
-                    queriedFeatures.forEach { qf ->
-                        val key = "${qf.queriedFeature.source}|${qf.queriedFeature.sourceLayer ?: "nil"}"
-                        sourceCounts[key] = (sourceCounts[key] ?: 0) + 1
-                    }
-                    sourceCounts.forEach { (key, count) ->
-                        Log.d(TAG, "  Source breakdown: $key = $count features")
-                    }
-
                     val currentFeatureIds = mutableSetOf<String>()
                     val previousFeatureIds = visibleFeatureIds[config.id] ?: mutableSetOf()
                     val useLayerFeatureBinding = config.associatedSymbolLayerId != null
-                    var matchedCount = 0
-                    var skippedNoId = 0
 
                     queriedFeatures.forEach { queriedFeature ->
                         // Filter by source
@@ -259,7 +236,6 @@ class ViewLayerController(
                             return@forEach
                         }
 
-                        matchedCount++
                         val feature = queriedFeature.queriedFeature.feature
 
                         // Get the namespaced feature ID for tracking
@@ -270,10 +246,6 @@ class ViewLayerController(
                         )
 
                         if (featureId == null) {
-                            skippedNoId++
-                            if (useLayerFeatureBinding) {
-                                Log.d(TAG, "Skipping feature without explicit ID (required for symbol layer binding). Feature id: ${feature.id()}, properties: ${feature.properties()}")
-                            }
                             return@forEach
                         }
 
@@ -290,8 +262,6 @@ class ViewLayerController(
                         }
                     }
 
-                    Log.d(TAG, "Layer ${config.id}: matched=$matchedCount, skippedNoId=$skippedNoId, newFeatures=${(currentFeatureIds - previousFeatureIds).size}")
-
                     // Remove annotations for features no longer visible
                     val removedFeatures = previousFeatureIds - currentFeatureIds
                     removedFeatures.forEach { featureId ->
@@ -301,12 +271,10 @@ class ViewLayerController(
                     visibleFeatureIds[config.id] = currentFeatureIds
                 }
 
-                expected.error?.let { error ->
-                    Log.e(TAG, "Error querying features for layer ${config.id}: $error")
-                }
+                // Errors are silently ignored
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error querying features for layer ${config.id}", e)
+            // Errors are silently ignored
         }
     }
 
@@ -316,6 +284,10 @@ class ViewLayerController(
      * @param sourceLayer The source layer name for namespacing
      * @param requireExplicit If true, returns null when no explicit ID is found (no coordinate fallback)
      * @param rawId If true, returns just the raw ID without sourceLayer prefix (for layer feature binding)
+     *
+     * IMPORTANT: When using `associatedSymbolLayerId` for layer feature binding, do NOT use
+     * `promoteId` on the source. The Mapbox SDK's `.layerFeature()` binding mechanism is
+     * incompatible with promoteId - it cannot find features when promoteId is set.
      */
     private fun getFeatureId(feature: Feature, sourceLayer: String?, requireExplicit: Boolean = false, rawId: Boolean = false): String? {
         // Try to get feature ID
@@ -346,7 +318,6 @@ class ViewLayerController(
     private fun createAnnotationForFeature(config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = null) {
         val geometry = feature.geometry()
         if (geometry !is Point) {
-            Log.w(TAG, "ViewLayer only supports Point geometries, skipping feature")
             return
         }
 
@@ -394,14 +365,12 @@ class ViewLayerController(
         }
 
         featureAnnotations[config.id]?.add(annotationId)
-        Log.d(TAG, "Created annotation $annotationId for feature $featureId")
     }
 
     private fun removeAnnotationForFeature(layerId: String, featureId: String) {
         val annotationId = "${layerId}_$featureId"
         viewAnnotationController.remove(annotationId)
         featureAnnotations[layerId]?.remove(annotationId)
-        Log.d(TAG, "Removed annotation $annotationId")
     }
 
     private fun removeAllAnnotationsForLayer(layerId: String) {

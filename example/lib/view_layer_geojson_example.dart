@@ -93,10 +93,16 @@ class ViewLayerGeoJsonExampleState extends State<ViewLayerGeoJsonExample> {
       }
 
       // Add GeoJSON source with URL - Mapbox fetches the data automatically
+      //
+      // IMPORTANT: Do NOT use promoteId when using associatedSymbolLayerId!
+      // The Mapbox SDK's .layerFeature() binding mechanism is incompatible with
+      // promoteId - it cannot find features to bind to when promoteId is set.
+      // This is a limitation of the native Mapbox SDK, not the Flutter wrapper.
       await map.style.addSource(
         GeoJsonSource(
           id: _sourceId,
           data: _geoJsonUrl, // Just pass the URL, Mapbox handles fetching
+          // promoteId: "id", // DO NOT USE with associatedSymbolLayerId!
         ),
       );
 

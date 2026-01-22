@@ -132,6 +132,11 @@ class ViewLayer extends Layer {
   /// - Use the same source as this ViewLayer
   /// - Have features with explicit IDs (feature.id or properties['id'])
   ///
+  /// **IMPORTANT:** Do NOT use `promoteId` on the source when using this feature.
+  /// The Mapbox SDK's `.layerFeature()` binding mechanism is incompatible with
+  /// `promoteId` - it cannot find features to bind to when promoteId is set.
+  /// This is a limitation of the native Mapbox SDK.
+  ///
   /// Example:
   /// ```dart
   /// // First, add the symbol layer

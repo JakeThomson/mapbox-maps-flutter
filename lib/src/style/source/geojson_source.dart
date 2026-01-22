@@ -21,6 +21,7 @@ class GeoJsonSource extends Source {
     bool? autoMaxZoom,
     double? prefetchZoomDelta,
     TileCacheBudget? tileCacheBudget,
+    String? promoteId,
   }) : super(id: id) {
     _data = data;
     _maxzoom = maxzoom;
@@ -37,6 +38,7 @@ class GeoJsonSource extends Source {
     _autoMaxZoom = autoMaxZoom;
     _prefetchZoomDelta = prefetchZoomDelta;
     _tileCacheBudget = tileCacheBudget;
+    _promoteId = promoteId;
   }
 
   @override
@@ -262,6 +264,13 @@ class GeoJsonSource extends Source {
     });
   }
 
+  String? _promoteId;
+
+  /// A property to use as a feature id (for feature state).
+  /// This is useful when you need feature IDs to be strings (e.g., for layer feature binding
+  /// with view annotations) instead of auto-generated numeric IDs.
+  String? get promoteId => _promoteId;
+
   /// Update this GeojsonSource with a URL to a GeoJSON file, or inline GeoJSON.
   Future<void>? updateGeoJSON(String geoJson) async {
     return _style?.setStyleSourceProperty(id, "data", geoJson);
@@ -319,6 +328,9 @@ class GeoJsonSource extends Source {
       }
       if (_autoMaxZoom != null) {
         properties["autoMaxZoom"] = _autoMaxZoom;
+      }
+      if (_promoteId != null) {
+        properties["promoteId"] = _promoteId;
       }
     }
 

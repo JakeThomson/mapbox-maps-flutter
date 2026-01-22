@@ -1,5 +1,4 @@
 import UIKit
-import os.log
 import Flutter
 @_spi(Experimental) import MapboxMaps
 
@@ -28,7 +27,6 @@ class ViewLayerController {
     private let viewAnnotationController: ViewAnnotationController
     private let messenger: FlutterBinaryMessenger
     private let channelSuffix: String
-    private let logger = OSLog(subsystem: "com.mapbox.maps.mapbox_maps", category: "ViewLayerController")
 
     private var viewLayers: [String: ViewLayerConfig] = [:]
     private var featureAnnotations: [String: Set<String>] = [:]  // layerId -> Set of annotation IDs
@@ -69,13 +67,10 @@ class ViewLayerController {
                 self.viewLayers[config.id] = config
                 self.featureAnnotations[config.id] = []
                 self.visibleFeatureIds[config.id] = []
-
-                os_log("Added ViewLayer: %{public}@", log: self.logger, type: .info, config.id)
                 self.scheduleUpdate()
 
                 reply([:])
             } catch {
-                os_log("Error adding ViewLayer: %{public}@", log: self.logger, type: .error, error.localizedDescription)
                 reply(["error": ["code": "view_layer_error", "message": error.localizedDescription]])
             }
         }
@@ -104,12 +99,10 @@ class ViewLayerController {
                 }
 
                 self.viewLayers[config.id] = config
-                os_log("Updated ViewLayer: %{public}@", log: self.logger, type: .info, config.id)
                 self.scheduleUpdate()
 
                 reply([:])
             } catch {
-                os_log("Error updating ViewLayer: %{public}@", log: self.logger, type: .error, error.localizedDescription)
                 reply(["error": ["code": "view_layer_error", "message": error.localizedDescription]])
             }
         }
@@ -191,52 +184,6 @@ class ViewLayerController {
         // Get the viewport bounds to query features
         let screenBounds = mapView.bounds
 
-        os_log("queryFeatures for layer %{public}@: bounds=(%{public}f, %{public}f, %{public}f, %{public}f), sourceId=%{public}@, sourceLayer=%{public}@",
-               log: logger, type: .info,
-               config.id,
-               screenBounds.minX, screenBounds.minY, screenBounds.maxX, screenBounds.maxY,
-               config.sourceId,
-               config.sourceLayer ?? "nil")
-
-        // DEBUG: Query source features directly (doesn't require rendering)
-        if let sourceLayer = config.sourceLayer {
-            let sourceOptions = MapboxMaps.SourceQueryOptions(sourceLayerIds: [sourceLayer], filter: NSNull())
-            mapView.mapboxMap.querySourceFeatures(for: config.sourceId, options: sourceOptions) { [weak self] result in
-                guard let self = self else { return }
-                switch result {
-                case .success(let features):
-                    os_log("DEBUG querySourceFeatures for %{public}@/%{public}@: found %{public}d features",
-                           log: self.logger, type: .info, config.sourceId, sourceLayer, features.count)
-                    if let first = features.first {
-                        os_log("  First feature id: %{public}@, geometry: %{public}@",
-                               log: self.logger, type: .info,
-                               String(describing: first.queriedFeature.feature.identifier),
-                               String(describing: first.queriedFeature.feature.geometry))
-                        os_log("  First feature properties: %{public}@",
-                               log: self.logger, type: .info,
-                               String(describing: first.queriedFeature.feature.properties))
-                    }
-                case .failure(let error):
-                    os_log("DEBUG querySourceFeatures error: %{public}@", log: self.logger, type: .error, error.localizedDescription)
-                }
-            }
-        }
-
-        // DEBUG: Query the associated symbol layer directly if set
-        if let symbolLayerId = config.associatedSymbolLayerId {
-            let symbolOptions = MapboxMaps.RenderedQueryOptions(layerIds: [symbolLayerId], filter: nil)
-            mapView.mapboxMap.queryRenderedFeatures(with: screenBounds, options: symbolOptions) { [weak self] result in
-                guard let self = self else { return }
-                switch result {
-                case .success(let features):
-                    os_log("DEBUG queryRenderedFeatures for symbol layer %{public}@: found %{public}d features",
-                           log: self.logger, type: .info, symbolLayerId, features.count)
-                case .failure(let error):
-                    os_log("DEBUG symbol layer query error: %{public}@", log: self.logger, type: .error, error.localizedDescription)
-                }
-            }
-        }
-
         // Query rendered features using screen bounds
         var filterString: String? = nil
         if let filter = config.filter {
@@ -252,7 +199,6 @@ class ViewLayerController {
         )
 
         guard let options = try? pigeonOptions.toRenderedQueryOptions() else {
-            os_log("Error converting RenderedQueryOptions", log: self.logger, type: .error)
             return
         }
 
@@ -264,25 +210,10 @@ class ViewLayerController {
 
             switch result {
             case .success(let queriedFeatures):
-                os_log("queryRenderedFeatures returned %{public}d total features for layer %{public}@",
-                       log: self.logger, type: .info, queriedFeatures.count, config.id)
-
-                // Log unique sources found
-                var sourceCounts: [String: Int] = [:]
-                for qf in queriedFeatures {
-                    let key = "\(qf.queriedFeature.source)|\(qf.queriedFeature.sourceLayer ?? "nil")"
-                    sourceCounts[key, default: 0] += 1
-                }
-                for (key, count) in sourceCounts {
-                    os_log("  Source breakdown: %{public}@ = %{public}d features", log: self.logger, type: .info, key, count)
-                }
-
                 var currentFeatureIds = Set<String>()
                 let previousFeatureIds = self.visibleFeatureIds[config.id] ?? []
 
                 let useLayerFeatureBinding = config.associatedSymbolLayerId != nil
-                var matchedCount = 0
-                var skippedNoId = 0
 
                 for queriedFeature in queriedFeatures {
                     // Filter by source and sourceLayer
@@ -291,7 +222,6 @@ class ViewLayerController {
                         guard queriedFeature.queriedFeature.sourceLayer == sourceLayer else { continue }
                     }
 
-                    matchedCount += 1
                     let feature = queriedFeature.queriedFeature.feature
 
                     // Get the namespaced feature ID for tracking
@@ -300,11 +230,6 @@ class ViewLayerController {
                         sourceLayer: config.sourceLayer,
                         requireExplicit: useLayerFeatureBinding
                     ) else {
-                        skippedNoId += 1
-                        if useLayerFeatureBinding {
-                            os_log("Skipping feature without explicit ID (required for symbol layer binding). Feature properties: %{public}@",
-                                   log: self.logger, type: .debug, String(describing: feature.properties))
-                        }
                         continue
                     }
 
@@ -320,9 +245,6 @@ class ViewLayerController {
                     }
                 }
 
-                os_log("Layer %{public}@: matched=%{public}d, skippedNoId=%{public}d, newFeatures=%{public}d",
-                       log: self.logger, type: .info, config.id, matchedCount, skippedNoId, currentFeatureIds.subtracting(previousFeatureIds).count)
-
                 // Remove annotations for features no longer visible
                 let removedFeatures = previousFeatureIds.subtracting(currentFeatureIds)
                 for featureId in removedFeatures {
@@ -331,9 +253,8 @@ class ViewLayerController {
 
                 self.visibleFeatureIds[config.id] = currentFeatureIds
 
-            case .failure(let error):
-                os_log("Error querying features for layer %{public}@: %{public}@",
-                       log: self.logger, type: .error, config.id, error.localizedDescription)
+            case .failure:
+                break
             }
         }
     }
@@ -344,6 +265,10 @@ class ViewLayerController {
     ///   - sourceLayer: The source layer name for namespacing
     ///   - requireExplicit: If true, returns nil when no explicit ID is found (no coordinate fallback)
     ///   - rawId: If true, returns just the raw ID without sourceLayer prefix (for layer feature binding)
+    ///
+    /// IMPORTANT: When using `associatedSymbolLayerId` for layer feature binding, do NOT use
+    /// `promoteId` on the source. The Mapbox SDK's `.layerFeature()` binding mechanism is
+    /// incompatible with promoteId - it cannot find features when promoteId is set.
     private func getFeatureId(feature: Feature, sourceLayer: String?, requireExplicit: Bool = false, rawId: Bool = false) -> String? {
         // Try to get feature ID
         if let id = feature.identifier {
@@ -391,7 +316,6 @@ class ViewLayerController {
     ///   - rawFeatureId: The raw feature ID for layer feature binding (e.g., "123"). Only needed when using associatedSymbolLayerId.
     private func createAnnotation(for config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = nil) {
         guard case .point(let point) = feature.geometry else {
-            os_log("ViewLayer only supports Point geometries, skipping feature", log: logger, type: .default)
             return
         }
 
@@ -460,11 +384,8 @@ class ViewLayerController {
                 featureAnnotations[config.id] = []
             }
             featureAnnotations[config.id]?.insert(annotationId)
-            os_log("Created annotation %{public}@ for feature %{public}@",
-                   log: logger, type: .debug, annotationId, featureId)
-        case .failure(let error):
-            os_log("Failed to create annotation %{public}@: %{public}@",
-                   log: logger, type: .error, annotationId, error.localizedDescription)
+        case .failure:
+            break
         }
     }
 
@@ -472,7 +393,6 @@ class ViewLayerController {
         let annotationId = "\(layerId)_\(featureId)"
         _ = viewAnnotationController.remove(id: annotationId)
         featureAnnotations[layerId]?.remove(annotationId)
-        os_log("Removed annotation %{public}@", log: logger, type: .debug, annotationId)
     }
 
     private func removeAllAnnotations(forLayer layerId: String) {
