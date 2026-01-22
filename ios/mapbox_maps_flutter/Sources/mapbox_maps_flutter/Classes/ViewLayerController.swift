@@ -14,6 +14,7 @@ struct ViewLayerConfig {
     let filter: [Any]?
     let minZoom: Double?
     let maxZoom: Double?
+    let associatedSymbolLayerId: String?
 }
 
 struct PropertyMappingConfig {
@@ -152,7 +153,8 @@ class ViewLayerController {
             allowOverlap: obj["allowOverlap"] as? Bool ?? true,
             filter: obj["filter"] as? [Any],
             minZoom: obj["minzoom"] as? Double,
-            maxZoom: obj["maxzoom"] as? Double
+            maxZoom: obj["maxzoom"] as? Double,
+            associatedSymbolLayerId: obj["associatedSymbolLayerId"] as? String
         )
     }
 
@@ -189,6 +191,52 @@ class ViewLayerController {
         // Get the viewport bounds to query features
         let screenBounds = mapView.bounds
 
+        os_log("queryFeatures for layer %{public}@: bounds=(%{public}f, %{public}f, %{public}f, %{public}f), sourceId=%{public}@, sourceLayer=%{public}@",
+               log: logger, type: .info,
+               config.id,
+               screenBounds.minX, screenBounds.minY, screenBounds.maxX, screenBounds.maxY,
+               config.sourceId,
+               config.sourceLayer ?? "nil")
+
+        // DEBUG: Query source features directly (doesn't require rendering)
+        if let sourceLayer = config.sourceLayer {
+            let sourceOptions = MapboxMaps.SourceQueryOptions(sourceLayerIds: [sourceLayer], filter: NSNull())
+            mapView.mapboxMap.querySourceFeatures(for: config.sourceId, options: sourceOptions) { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let features):
+                    os_log("DEBUG querySourceFeatures for %{public}@/%{public}@: found %{public}d features",
+                           log: self.logger, type: .info, config.sourceId, sourceLayer, features.count)
+                    if let first = features.first {
+                        os_log("  First feature id: %{public}@, geometry: %{public}@",
+                               log: self.logger, type: .info,
+                               String(describing: first.queriedFeature.feature.identifier),
+                               String(describing: first.queriedFeature.feature.geometry))
+                        os_log("  First feature properties: %{public}@",
+                               log: self.logger, type: .info,
+                               String(describing: first.queriedFeature.feature.properties))
+                    }
+                case .failure(let error):
+                    os_log("DEBUG querySourceFeatures error: %{public}@", log: self.logger, type: .error, error.localizedDescription)
+                }
+            }
+        }
+
+        // DEBUG: Query the associated symbol layer directly if set
+        if let symbolLayerId = config.associatedSymbolLayerId {
+            let symbolOptions = MapboxMaps.RenderedQueryOptions(layerIds: [symbolLayerId], filter: nil)
+            mapView.mapboxMap.queryRenderedFeatures(with: screenBounds, options: symbolOptions) { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let features):
+                    os_log("DEBUG queryRenderedFeatures for symbol layer %{public}@: found %{public}d features",
+                           log: self.logger, type: .info, symbolLayerId, features.count)
+                case .failure(let error):
+                    os_log("DEBUG symbol layer query error: %{public}@", log: self.logger, type: .error, error.localizedDescription)
+                }
+            }
+        }
+
         // Query rendered features using screen bounds
         var filterString: String? = nil
         if let filter = config.filter {
@@ -216,8 +264,25 @@ class ViewLayerController {
 
             switch result {
             case .success(let queriedFeatures):
+                os_log("queryRenderedFeatures returned %{public}d total features for layer %{public}@",
+                       log: self.logger, type: .info, queriedFeatures.count, config.id)
+
+                // Log unique sources found
+                var sourceCounts: [String: Int] = [:]
+                for qf in queriedFeatures {
+                    let key = "\(qf.queriedFeature.source)|\(qf.queriedFeature.sourceLayer ?? "nil")"
+                    sourceCounts[key, default: 0] += 1
+                }
+                for (key, count) in sourceCounts {
+                    os_log("  Source breakdown: %{public}@ = %{public}d features", log: self.logger, type: .info, key, count)
+                }
+
                 var currentFeatureIds = Set<String>()
                 let previousFeatureIds = self.visibleFeatureIds[config.id] ?? []
+
+                let useLayerFeatureBinding = config.associatedSymbolLayerId != nil
+                var matchedCount = 0
+                var skippedNoId = 0
 
                 for queriedFeature in queriedFeatures {
                     // Filter by source and sourceLayer
@@ -226,17 +291,37 @@ class ViewLayerController {
                         guard queriedFeature.queriedFeature.sourceLayer == sourceLayer else { continue }
                     }
 
+                    matchedCount += 1
                     let feature = queriedFeature.queriedFeature.feature
 
-                    if let featureId = self.getFeatureId(feature: feature, sourceLayer: config.sourceLayer) {
-                        currentFeatureIds.insert(featureId)
-
-                        // If this is a new feature, create annotation
-                        if !previousFeatureIds.contains(featureId) {
-                            self.createAnnotation(for: config, feature: feature, featureId: featureId)
+                    // Get the namespaced feature ID for tracking
+                    guard let featureId = self.getFeatureId(
+                        feature: feature,
+                        sourceLayer: config.sourceLayer,
+                        requireExplicit: useLayerFeatureBinding
+                    ) else {
+                        skippedNoId += 1
+                        if useLayerFeatureBinding {
+                            os_log("Skipping feature without explicit ID (required for symbol layer binding). Feature properties: %{public}@",
+                                   log: self.logger, type: .debug, String(describing: feature.properties))
                         }
+                        continue
+                    }
+
+                    currentFeatureIds.insert(featureId)
+
+                    // If this is a new feature, create annotation
+                    if !previousFeatureIds.contains(featureId) {
+                        // Get raw feature ID for layer feature binding
+                        let rawFeatureId: String? = useLayerFeatureBinding ?
+                            self.getFeatureId(feature: feature, sourceLayer: config.sourceLayer, requireExplicit: true, rawId: true) : nil
+
+                        self.createAnnotation(for: config, feature: feature, featureId: featureId, rawFeatureId: rawFeatureId)
                     }
                 }
+
+                os_log("Layer %{public}@: matched=%{public}d, skippedNoId=%{public}d, newFeatures=%{public}d",
+                       log: self.logger, type: .info, config.id, matchedCount, skippedNoId, currentFeatureIds.subtracting(previousFeatureIds).count)
 
                 // Remove annotations for features no longer visible
                 let removedFeatures = previousFeatureIds.subtracting(currentFeatureIds)
@@ -253,7 +338,13 @@ class ViewLayerController {
         }
     }
 
-    private func getFeatureId(feature: Feature, sourceLayer: String?) -> String? {
+    /// Gets the feature ID for annotation tracking.
+    /// - Parameters:
+    ///   - feature: The map feature
+    ///   - sourceLayer: The source layer name for namespacing
+    ///   - requireExplicit: If true, returns nil when no explicit ID is found (no coordinate fallback)
+    ///   - rawId: If true, returns just the raw ID without sourceLayer prefix (for layer feature binding)
+    private func getFeatureId(feature: Feature, sourceLayer: String?, requireExplicit: Bool = false, rawId: Bool = false) -> String? {
         // Try to get feature ID
         if let id = feature.identifier {
             let idString: String
@@ -261,26 +352,44 @@ class ViewLayerController {
             case .string(let str):
                 idString = str
             case .number(let num):
-                idString = String(describing: num)
+                // IMPORTANT: Use Int64 conversion to avoid scientific notation for large numbers
+                // MVT feature IDs are 64-bit integers, and annotatedLayerFeature needs exact match
+                if num.truncatingRemainder(dividingBy: 1) == 0 {
+                    idString = String(Int64(num))
+                } else {
+                    idString = String(num)
+                }
             }
-            return "\(sourceLayer ?? "default")_\(idString)"
+            return rawId ? idString : "\(sourceLayer ?? "default")_\(idString)"
         }
 
         // Try to get ID from properties
         if let properties = feature.properties,
            case .string(let idStr) = properties["id"] {
-            return "\(sourceLayer ?? "default")_\(idStr)"
+            return rawId ? idStr : "\(sourceLayer ?? "default")_\(idStr)"
         }
 
-        // Use geometry coordinates as fallback ID
-        if case .point(let point) = feature.geometry {
+        if let properties = feature.properties,
+           case .number(let idNum) = properties["id"] {
+            let idStr = String(describing: idNum)
+            return rawId ? idStr : "\(sourceLayer ?? "default")_\(idStr)"
+        }
+
+        // Only use coordinate fallback if not requiring explicit IDs
+        if !requireExplicit, case .point(let point) = feature.geometry {
             return "\(sourceLayer ?? "default")_\(point.coordinates.longitude)_\(point.coordinates.latitude)"
         }
 
         return nil
     }
 
-    private func createAnnotation(for config: ViewLayerConfig, feature: Feature, featureId: String) {
+    /// Creates an annotation for a feature.
+    /// - Parameters:
+    ///   - config: The ViewLayer configuration
+    ///   - feature: The map feature
+    ///   - featureId: The namespaced feature ID for tracking (e.g., "sourceLayer_123")
+    ///   - rawFeatureId: The raw feature ID for layer feature binding (e.g., "123"). Only needed when using associatedSymbolLayerId.
+    private func createAnnotation(for config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = nil) {
         guard case .point(let point) = feature.geometry else {
             os_log("ViewLayer only supports Point geometries, skipping feature", log: logger, type: .default)
             return
@@ -319,15 +428,31 @@ class ViewLayerController {
 
         let annotationId = "\(config.id)_\(featureId)"
 
-        let result = viewAnnotationController.add(
-            id: annotationId,
-            layoutName: config.layoutName,
-            latitude: point.coordinates.latitude,
-            longitude: point.coordinates.longitude,
-            data: viewData,
-            anchor: config.anchor,
-            allowOverlap: config.allowOverlap
-        )
+        let result: Result<Void, Error>
+
+        // Use layer feature binding if associatedSymbolLayerId is set
+        if let symbolLayerId = config.associatedSymbolLayerId, let rawId = rawFeatureId {
+            result = viewAnnotationController.addWithLayerFeature(
+                id: annotationId,
+                layoutName: config.layoutName,
+                associatedLayerId: symbolLayerId,
+                featureId: rawId,
+                data: viewData,
+                anchor: config.anchor,
+                allowOverlap: config.allowOverlap
+            )
+        } else {
+            // Fallback to coordinate-based (legacy behavior)
+            result = viewAnnotationController.add(
+                id: annotationId,
+                layoutName: config.layoutName,
+                latitude: point.coordinates.latitude,
+                longitude: point.coordinates.longitude,
+                data: viewData,
+                anchor: config.anchor,
+                allowOverlap: config.allowOverlap
+            )
+        }
 
         switch result {
         case .success:

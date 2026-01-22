@@ -14,6 +14,7 @@ class ViewAnnotationController {
     private var layoutNames: [String: String] = [:]
     private var annotationOptions: [String: ViewAnnotationOptions] = [:]
     private var annotationData: [String: [String: Any]] = [:]
+    private var viewAnnotationObjects: [String: ViewAnnotation] = [:]  // For layer feature binding
     private let logger = OSLog(subsystem: "com.mapbox.maps.mapbox_maps", category: "ViewAnnotationController")
     private let tapEventChannel: FlutterMethodChannel
     
@@ -96,7 +97,84 @@ class ViewAnnotationController {
             return .failure(error)
         }
     }
-    
+
+    /// Add a view annotation bound to a symbol layer feature.
+    /// This enables shared collision detection between the view annotation and symbol layer.
+    func addWithLayerFeature(
+        id: String,
+        layoutName: String,
+        associatedLayerId: String,
+        featureId: String,
+        data: [String: Any]?,
+        anchor: String?,
+        allowOverlap: Bool
+    ) -> Result<Void, Error> {
+        os_log("[%{public}@] Starting add view annotation with layer feature binding to layer %{public}@, feature %{public}@", log: logger, type: .info, id, associatedLayerId, featureId)
+
+        if annotations[id] != nil {
+            os_log("[%{public}@] ERROR: Annotation already exists", log: logger, type: .error, id)
+            return .failure(NSError(
+                domain: "ViewAnnotationController",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Annotation with id '\(id)' already exists"]
+            ))
+        }
+
+        guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data) else {
+            os_log("[%{public}@] ERROR: No view registered for '%{public}@'", log: logger, type: .error, id, layoutName)
+            return .failure(NSError(
+                domain: "ViewAnnotationController",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "No view registered for '\(layoutName)'"]
+            ))
+        }
+
+        os_log("[%{public}@] View created: %{public}@", log: logger, type: .info, id, String(describing: type(of: view)))
+
+        // Size the view
+        let sizingResult = sizeView(view, id: id)
+        switch sizingResult {
+        case .failure:
+            return sizingResult
+        case .success:
+            break
+        }
+
+        // Create ViewAnnotation with layer feature binding
+        let annotation = ViewAnnotation(
+            annotatedFeature: .layerFeature(layerId: associatedLayerId, featureId: featureId),
+            view: view
+        )
+
+        // Configure anchor
+        annotation.variableAnchors = [ViewAnnotationAnchorConfig(anchor: parseAnchor(anchor))]
+        annotation.allowOverlap = allowOverlap
+
+        // Add tap gesture recognizer
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        view.addGestureRecognizer(tapGesture)
+        view.isUserInteractionEnabled = true
+        objc_setAssociatedObject(tapGesture, &AssociatedKeys.annotationId, id, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        mapView.viewAnnotations.add(annotation)
+
+        annotations[id] = view
+        layoutNames[id] = layoutName
+        annotationData[id] = data ?? [:]
+        viewAnnotationObjects[id] = annotation
+
+        // Debug: Check annotation state after adding
+        os_log("[%{public}@] ViewAnnotation state - allowOverlap: %{public}@, view.frame: %{public}@, view.isHidden: %{public}@, view.alpha: %{public}f",
+               log: logger, type: .info, id,
+               String(describing: annotation.allowOverlap),
+               String(describing: view.frame),
+               String(describing: view.isHidden),
+               view.alpha)
+
+        os_log("[%{public}@] Successfully added view annotation with layer feature binding", log: logger, type: .info, id)
+        return .success(())
+    }
+
     func update(
         id: String,
         latitude: Double?,
@@ -104,28 +182,33 @@ class ViewAnnotationController {
         data: [String: Any]?
     ) -> Result<Void, Error> {
         guard let oldView = annotations[id],
-              let layoutName = layoutNames[id],
-              var options = annotationOptions[id] else {
+              let layoutName = layoutNames[id] else {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 3,
                 userInfo: [NSLocalizedDescriptionKey: "Annotation with id '\(id)' not found"]
             ))
         }
-        
-        // Update options if new coordinate provided
-        if let lat = latitude, let lng = longitude {
+
+        // Check if this is a ViewLayer annotation (uses ViewAnnotation object)
+        let isViewLayerAnnotation = viewAnnotationObjects[id] != nil
+
+        // Get options if available (may be nil for ViewLayer-created annotations)
+        var options = annotationOptions[id]
+
+        // Update options if new coordinate provided (only for non-ViewLayer annotations)
+        if let lat = latitude, let lng = longitude, !isViewLayerAnnotation {
             let coordinate = CLLocationCoordinate2D(latitude: lat, longitude: lng)
             options = ViewAnnotationOptions(geometry: Point(coordinate))
         }
-        
+
         // If data is provided, try to update the existing view in place
         // This preserves SwiftUI animation state (like Compose does on Android)
         if let data = data {
             // Try to update existing view properties using Key-Value Coding
             // This works for views that expose properties like 'emoji', 'selected', etc.
             var viewUpdated = false
-            
+
             // Update common properties if they exist
             if let emoji = data["callout_emoji"] as? String {
                 if oldView.responds(to: NSSelectorFromString("setEmoji:")) {
@@ -133,26 +216,26 @@ class ViewAnnotationController {
                     viewUpdated = true
                 }
             }
-            
+
             if let selected = data["selected"] as? Bool {
                 if oldView.responds(to: NSSelectorFromString("setSelected:")) {
                     oldView.setValue(selected, forKey: "selected")
                     viewUpdated = true
                 }
             }
-            
+
             if let label = data["callout_label"] as? String {
                 if oldView.responds(to: NSSelectorFromString("setLabel:")) {
                     oldView.setValue(label, forKey: "label")
                     viewUpdated = true
                 }
             }
-            
+
             // If we successfully updated the view, just update the stored data and options
             if viewUpdated {
                 annotationData[id] = data
-                // Update position if needed
-                if latitude != nil || longitude != nil {
+                // Update position if needed (only for non-ViewLayer annotations with valid options)
+                if let options = options, latitude != nil || longitude != nil, !isViewLayerAnnotation {
                     do {
                         try mapView.viewAnnotations.update(oldView, options: options)
                         annotationOptions[id] = options
@@ -162,11 +245,19 @@ class ViewAnnotationController {
                 }
                 return .success(())
             }
-            
+
+            // For ViewLayer annotations, if in-place update failed, we can't easily recreate
+            // because they're bound to features. Just return success with a warning.
+            if isViewLayerAnnotation {
+                os_log("[%{public}@] ViewLayer annotation view doesn't support in-place property updates", log: logger, type: .default, id)
+                annotationData[id] = data
+                return .success(())
+            }
+
             // Fallback: If view doesn't support property updates, recreate it
             // Remove old view
             mapView.viewAnnotations.remove(oldView)
-            
+
             // Create new view with updated data
             guard let newView = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data) else {
                 return .failure(NSError(
@@ -175,7 +266,7 @@ class ViewAnnotationController {
                     userInfo: [NSLocalizedDescriptionKey: "Failed to create view for '\(layoutName)'"]
                 ))
             }
-            
+
             // Size the new view
             let sizingResult = sizeView(newView, id: id)
             switch sizingResult {
@@ -184,27 +275,42 @@ class ViewAnnotationController {
             case .success:
                 break
             }
-            
+
             // Add tap gesture recognizer
             let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
             newView.addGestureRecognizer(tapGesture)
             newView.isUserInteractionEnabled = true
             objc_setAssociatedObject(tapGesture, &AssociatedKeys.annotationId, id, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-            
-            // Add new view with updated options
+
+            // Add new view with updated options (should always have options for non-ViewLayer annotations)
+            guard let opts = options else {
+                return .failure(NSError(
+                    domain: "ViewAnnotationController",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "No options available for annotation '\(id)'"]
+                ))
+            }
+
             do {
-                try mapView.viewAnnotations.add(newView, options: options)
+                try mapView.viewAnnotations.add(newView, options: opts)
                 annotations[id] = newView
-                annotationOptions[id] = options
+                annotationOptions[id] = opts
                 annotationData[id] = data
             } catch {
                 return .failure(error)
             }
-        } else if latitude != nil || longitude != nil {
-            // Only update position without recreating view
+        } else if latitude != nil || longitude != nil, !isViewLayerAnnotation {
+            // Only update position without recreating view (only for non-ViewLayer annotations)
+            guard let opts = options else {
+                return .failure(NSError(
+                    domain: "ViewAnnotationController",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "No options available for annotation '\(id)'"]
+                ))
+            }
             do {
-                try mapView.viewAnnotations.update(oldView, options: options)
-                annotationOptions[id] = options
+                try mapView.viewAnnotations.update(oldView, options: opts)
+                annotationOptions[id] = opts
             } catch {
                 return .failure(error)
             }
@@ -290,6 +396,17 @@ class ViewAnnotationController {
     }
     
     func remove(id: String) -> Result<Void, Error> {
+        // Check if using new ViewAnnotation API (layer feature binding)
+        if let annotation = viewAnnotationObjects.removeValue(forKey: id) {
+            annotation.remove()
+            annotations.removeValue(forKey: id)
+            layoutNames.removeValue(forKey: id)
+            annotationOptions.removeValue(forKey: id)
+            annotationData.removeValue(forKey: id)
+            return .success(())
+        }
+
+        // Fallback to legacy coordinate-based removal
         guard let view = annotations.removeValue(forKey: id) else {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -297,15 +414,22 @@ class ViewAnnotationController {
                 userInfo: [NSLocalizedDescriptionKey: "Annotation with id '\(id)' not found"]
             ))
         }
-        
+
         mapView.viewAnnotations.remove(view)
         layoutNames.removeValue(forKey: id)
         annotationOptions.removeValue(forKey: id)
         annotationData.removeValue(forKey: id)
         return .success(())
     }
-    
+
     func removeAll() {
+        // Remove new-style annotations (layer feature binding)
+        for annotation in viewAnnotationObjects.values {
+            annotation.remove()
+        }
+        viewAnnotationObjects.removeAll()
+
+        // Remove legacy coordinate-based annotations
         for view in annotations.values {
             mapView.viewAnnotations.remove(view)
         }

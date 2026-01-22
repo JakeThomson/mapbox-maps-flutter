@@ -28,6 +28,9 @@ import 'package:mapbox_maps_example/tile_json_example.dart';
 import 'package:mapbox_maps_example/vector_tile_source_example.dart';
 import 'package:mapbox_maps_example/view_annotation_example.dart';
 import 'package:mapbox_maps_example/view_layer_example.dart';
+import 'package:mapbox_maps_example/view_layer_symbol_binding_example.dart';
+import 'package:mapbox_maps_example/view_annotation_marker_example.dart';
+import 'package:mapbox_maps_example/view_layer_geojson_example.dart';
 import 'package:mapbox_maps_example/viewport_example.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
@@ -44,7 +47,10 @@ import 'map_recorder_example.dart';
 final List<Example> _allPages = <Example>[
   SimpleMapExample(),
   ViewAnnotationExample(),
+  ViewAnnotationMarkerExample(),
   ViewLayerExample(),
+  ViewLayerSymbolBindingExample(),
+  ViewLayerGeoJsonExample(),
   ViewportExample(),
   SnapshotterExample(),
   TrafficRouteLineExample(),

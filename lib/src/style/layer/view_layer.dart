@@ -79,6 +79,7 @@ class ViewLayer extends Layer {
     required Map<String, PropertyMapping> this.propertyMapping,
     ViewAnnotationAnchor? this.anchor,
     bool? this.allowOverlap,
+    String? this.associatedSymbolLayerId,
   }) : super(
             id: id,
             visibility: visibility,
@@ -118,6 +119,38 @@ class ViewLayer extends Layer {
   /// Whether the view annotation can overlap with other annotations.
   /// Default value: true
   bool? allowOverlap;
+
+  /// The ID of an existing SymbolLayer to bind view annotations to.
+  ///
+  /// When set, view annotations are bound to symbol layer features using
+  /// Mapbox's `annotatedFeature: .layerFeature()` API. This enables shared
+  /// collision detection - when symbols hide due to collision, their bound
+  /// view annotations also hide, and vice versa.
+  ///
+  /// The symbol layer must:
+  /// - Already exist in the style before the ViewLayer is added
+  /// - Use the same source as this ViewLayer
+  /// - Have features with explicit IDs (feature.id or properties['id'])
+  ///
+  /// Example:
+  /// ```dart
+  /// // First, add the symbol layer
+  /// await mapboxMap.style.addLayer(SymbolLayer(
+  ///   id: "poi-symbols",
+  ///   sourceId: "poi-source",
+  /// )..textField = "{name}"
+  ///  ..textAllowOverlap = false);
+  ///
+  /// // Then, add the view layer referencing it
+  /// await mapboxMap.style.addLayer(ViewLayer(
+  ///   id: "poi-views",
+  ///   sourceId: "poi-source",
+  ///   associatedSymbolLayerId: "poi-symbols",
+  ///   layoutName: "custom_callout",
+  ///   propertyMapping: {...},
+  /// ));
+  /// ```
+  String? associatedSymbolLayerId;
 
   @override
   Future<String> _encode() async {
@@ -181,6 +214,9 @@ class ViewLayer extends Layer {
     if (allowOverlap != null) {
       properties["allowOverlap"] = allowOverlap!;
     }
+    if (associatedSymbolLayerId != null) {
+      properties["associatedSymbolLayerId"] = associatedSymbolLayerId!;
+    }
 
     return json.encode(properties);
   }
@@ -228,6 +264,7 @@ class ViewLayer extends Layer {
           : ViewAnnotationAnchor.values.firstWhere(
               (e) => e.name == map["anchor"]),
       allowOverlap: map["allowOverlap"],
+      associatedSymbolLayerId: map["associatedSymbolLayerId"] as String?,
     );
   }
 }

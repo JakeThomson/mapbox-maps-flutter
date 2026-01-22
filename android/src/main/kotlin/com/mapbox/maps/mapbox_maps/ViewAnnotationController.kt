@@ -46,6 +46,7 @@ class ViewAnnotationController(
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
+    private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -164,6 +165,111 @@ class ViewAnnotationController(
         return Result.success(Unit)
     }
 
+    /// Add a view annotation bound to a symbol layer feature.
+    /// This enables shared collision detection between the view annotation and symbol layer.
+    fun addWithLayerFeature(
+        id: String,
+        layoutName: String,
+        associatedLayerId: String,
+        featureId: String,
+        data: Map<String, Any?>?,
+        anchor: String?,
+        allowOverlap: Boolean
+    ): Result<Unit> {
+        if (annotations.containsKey(id)) {
+            return Result.failure(Exception("Annotation with id '$id' already exists"))
+        }
+
+        val factory = ViewAnnotationRegistry.getFactory(layoutName)
+            ?: return Result.failure(Exception("No view registered for '$layoutName'. Register it using ViewAnnotationRegistry.register()"))
+
+        val container = FrameLayout(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val composeView = ComposeView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.setViewTreeLifecycleOwner(composeLifecycleOwner)
+        container.setViewTreeViewModelStoreOwner(composeLifecycleOwner)
+        container.setViewTreeSavedStateRegistryOwner(composeLifecycleOwner)
+
+        composeView.setParentCompositionContext(recomposer)
+
+        container.addView(composeView)
+
+        // Store references before async operation
+        annotations[id] = container
+        layoutNames[id] = layoutName
+        annotationData[id] = data ?: emptyMap()
+        viewLayerAnnotations.add(id)  // Mark as ViewLayer annotation
+
+        // Set click listener immediately (before any async work)
+        container.setOnClickListener {
+            Log.d(TAG, "[$id] View annotation tapped")
+            val tapData = annotationData[id] ?: emptyMap()
+            tapEventChannel.invokeMethod("onTap", mapOf(
+                "id" to id,
+                "data" to tapData
+            ))
+        }
+
+        // Get the activity's root view to temporarily attach our view
+        val activity = findActivity(context)
+        if (activity == null) {
+            Log.e(TAG, "[$id] Could not find Activity from context")
+            return Result.failure(Exception("Could not find Activity from context"))
+        }
+
+        val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
+
+        // Temporarily add to window (invisible) so ComposeView can attach and compose
+        container.visibility = View.INVISIBLE
+        rootView.addView(container)
+
+        Log.d(TAG, "[$id] Temporarily attached to window, setting content for layer feature binding")
+
+        composeView.setContent {
+            factory(data ?: emptyMap())
+        }
+
+        // Wait for composition and layout
+        composeView.post {
+            composeView.post {
+                Log.d(TAG, "[$id] After posts - container: ${container.width}x${container.height}, composeView: ${composeView.width}x${composeView.height}")
+
+                // Remove from root view
+                rootView.removeView(container)
+                container.visibility = View.VISIBLE
+
+                if (annotations.containsKey(id)) {
+                    // Use annotatedLayerFeature for binding to symbol layer
+                    val options = viewAnnotationOptions {
+                        annotatedLayerFeature(associatedLayerId) {
+                            featureId(featureId)
+                        }
+                        allowOverlap(allowOverlap)
+                        annotationAnchor {
+                            anchor(parseAnchor(anchor))
+                        }
+                    }
+
+                    Log.d(TAG, "[$id] Adding view annotation with layer feature binding to layer $associatedLayerId, feature $featureId")
+                    viewAnnotationManager.addViewAnnotation(container, options)
+                }
+            }
+        }
+
+        return Result.success(Unit)
+    }
+
     fun update(
         id: String,
         latitude: Double?,
@@ -191,7 +297,8 @@ class ViewAnnotationController(
             }
         }
 
-        if (latitude != null && longitude != null) {
+        // Only update coordinates for non-ViewLayer annotations (ViewLayer annotations are bound to features)
+        if (latitude != null && longitude != null && !viewLayerAnnotations.contains(id)) {
             val updateOptions = viewAnnotationOptions {
                 geometry(Point.fromLngLat(longitude, latitude))
             }
@@ -207,6 +314,7 @@ class ViewAnnotationController(
 
         layoutNames.remove(id)
         annotationData.remove(id)
+        viewLayerAnnotations.remove(id)
         viewAnnotationManager.removeViewAnnotation(view)
         return Result.success(Unit)
     }
@@ -218,6 +326,7 @@ class ViewAnnotationController(
         annotations.clear()
         layoutNames.clear()
         annotationData.clear()
+        viewLayerAnnotations.clear()
     }
 
     private fun parseAnchor(anchor: String?): ViewAnnotationAnchor {

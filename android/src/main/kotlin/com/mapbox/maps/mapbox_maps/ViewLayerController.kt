@@ -26,7 +26,8 @@ data class ViewLayerConfig(
     val allowOverlap: Boolean,
     val filter: List<Any>?,
     val minZoom: Double?,
-    val maxZoom: Double?
+    val maxZoom: Double?,
+    val associatedSymbolLayerId: String?
 )
 
 data class PropertyMappingConfig(
@@ -150,7 +151,8 @@ class ViewLayerController(
             allowOverlap = obj.optBoolean("allowOverlap", true),
             filter = parseFilter(obj.optJSONArray("filter")),
             minZoom = if (obj.has("minzoom")) obj.getDouble("minzoom") else null,
-            maxZoom = if (obj.has("maxzoom")) obj.getDouble("maxzoom") else null
+            maxZoom = if (obj.has("maxzoom")) obj.getDouble("maxzoom") else null,
+            associatedSymbolLayerId = obj.optString("associatedSymbolLayerId", null).takeIf { it.isNotEmpty() }
         )
     }
 
@@ -207,35 +209,88 @@ class ViewLayerController(
 
     private fun queryFeaturesForLayer(config: ViewLayerConfig) {
         try {
-            // Query features from the source
+            // Query rendered features - use null layerIds to query all layers,
+            // then filter by source and sourceLayer below
             val options = RenderedQueryOptions(
-                listOf(config.sourceId),
+                null,  // Query all layers, filter by source below
                 config.filter
             )
 
-            // Query entire viewport
-            val geometry = RenderedQueryGeometry(mapboxMap.pixelForCoordinate(
-                mapboxMap.cameraState.center
-            ))
+            // Query entire viewport using screen bounds
+            val screenBox = com.mapbox.maps.ScreenBox(
+                com.mapbox.maps.ScreenCoordinate(0.0, 0.0),
+                com.mapbox.maps.ScreenCoordinate(
+                    mapView.width.toDouble(),
+                    mapView.height.toDouble()
+                )
+            )
 
-            mapboxMap.queryRenderedFeatures(geometry, options) { expected ->
+            Log.d(TAG, "queryFeaturesForLayer ${config.id}: bounds=(0,0,${mapView.width},${mapView.height}), sourceId=${config.sourceId}, sourceLayer=${config.sourceLayer}")
+
+            mapboxMap.queryRenderedFeatures(screenBox, options) { expected ->
                 expected.value?.let { queriedFeatures ->
+                    Log.d(TAG, "queryRenderedFeatures returned ${queriedFeatures.size} total features for layer ${config.id}")
+
+                    // Log unique sources found
+                    val sourceCounts = mutableMapOf<String, Int>()
+                    queriedFeatures.forEach { qf ->
+                        val key = "${qf.queriedFeature.source}|${qf.queriedFeature.sourceLayer ?: "nil"}"
+                        sourceCounts[key] = (sourceCounts[key] ?: 0) + 1
+                    }
+                    sourceCounts.forEach { (key, count) ->
+                        Log.d(TAG, "  Source breakdown: $key = $count features")
+                    }
+
                     val currentFeatureIds = mutableSetOf<String>()
                     val previousFeatureIds = visibleFeatureIds[config.id] ?: mutableSetOf()
+                    val useLayerFeatureBinding = config.associatedSymbolLayerId != null
+                    var matchedCount = 0
+                    var skippedNoId = 0
 
                     queriedFeatures.forEach { queriedFeature ->
+                        // Filter by source
+                        if (queriedFeature.queriedFeature.source != config.sourceId) {
+                            return@forEach
+                        }
+
+                        // Filter by sourceLayer if specified
+                        if (config.sourceLayer != null &&
+                            queriedFeature.queriedFeature.sourceLayer != config.sourceLayer) {
+                            return@forEach
+                        }
+
+                        matchedCount++
                         val feature = queriedFeature.queriedFeature.feature
-                        val featureId = getFeatureId(feature, config.sourceLayer)
 
-                        if (featureId != null) {
-                            currentFeatureIds.add(featureId)
+                        // Get the namespaced feature ID for tracking
+                        val featureId = getFeatureId(
+                            feature,
+                            config.sourceLayer,
+                            requireExplicit = useLayerFeatureBinding
+                        )
 
-                            // If this is a new feature, create annotation
-                            if (!previousFeatureIds.contains(featureId)) {
-                                createAnnotationForFeature(config, feature, featureId)
+                        if (featureId == null) {
+                            skippedNoId++
+                            if (useLayerFeatureBinding) {
+                                Log.d(TAG, "Skipping feature without explicit ID (required for symbol layer binding). Feature id: ${feature.id()}, properties: ${feature.properties()}")
                             }
+                            return@forEach
+                        }
+
+                        currentFeatureIds.add(featureId)
+
+                        // If this is a new feature, create annotation
+                        if (!previousFeatureIds.contains(featureId)) {
+                            // Get raw feature ID for layer feature binding
+                            val rawFeatureId: String? = if (useLayerFeatureBinding) {
+                                getFeatureId(feature, config.sourceLayer, requireExplicit = true, rawId = true)
+                            } else null
+
+                            createAnnotationForFeature(config, feature, featureId, rawFeatureId)
                         }
                     }
+
+                    Log.d(TAG, "Layer ${config.id}: matched=$matchedCount, skippedNoId=$skippedNoId, newFeatures=${(currentFeatureIds - previousFeatureIds).size}")
 
                     // Remove annotations for features no longer visible
                     val removedFeatures = previousFeatureIds - currentFeatureIds
@@ -255,25 +310,40 @@ class ViewLayerController(
         }
     }
 
-    private fun getFeatureId(feature: Feature, sourceLayer: String?): String? {
+    /**
+     * Gets the feature ID for annotation tracking.
+     * @param feature The map feature
+     * @param sourceLayer The source layer name for namespacing
+     * @param requireExplicit If true, returns null when no explicit ID is found (no coordinate fallback)
+     * @param rawId If true, returns just the raw ID without sourceLayer prefix (for layer feature binding)
+     */
+    private fun getFeatureId(feature: Feature, sourceLayer: String?, requireExplicit: Boolean = false, rawId: Boolean = false): String? {
         // Try to get feature ID
         val featureId = feature.id() ?: feature.getStringProperty("id")
 
-        // If no ID, create one from geometry and properties
         return if (featureId != null) {
-            "${sourceLayer ?: "default"}_$featureId"
-        } else {
-            // Use geometry coordinates as fallback ID
+            if (rawId) featureId else "${sourceLayer ?: "default"}_$featureId"
+        } else if (!requireExplicit) {
+            // Only use coordinate fallback if not requiring explicit IDs
             val geometry = feature.geometry()
             if (geometry is Point) {
                 "${sourceLayer ?: "default"}_${geometry.longitude()}_${geometry.latitude()}"
             } else {
                 null
             }
+        } else {
+            null
         }
     }
 
-    private fun createAnnotationForFeature(config: ViewLayerConfig, feature: Feature, featureId: String) {
+    /**
+     * Creates an annotation for a feature.
+     * @param config The ViewLayer configuration
+     * @param feature The map feature
+     * @param featureId The namespaced feature ID for tracking (e.g., "sourceLayer_123")
+     * @param rawFeatureId The raw feature ID for layer feature binding (e.g., "123"). Only needed when using associatedSymbolLayerId.
+     */
+    private fun createAnnotationForFeature(config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = null) {
         val geometry = feature.geometry()
         if (geometry !is Point) {
             Log.w(TAG, "ViewLayer only supports Point geometries, skipping feature")
@@ -299,15 +369,29 @@ class ViewLayerController(
 
         val annotationId = "${config.id}_$featureId"
 
-        viewAnnotationController.add(
-            id = annotationId,
-            layoutName = config.layoutName,
-            latitude = geometry.latitude(),
-            longitude = geometry.longitude(),
-            data = viewData,
-            anchor = config.anchor,
-            allowOverlap = config.allowOverlap
-        )
+        // Use layer feature binding if associatedSymbolLayerId is set
+        if (config.associatedSymbolLayerId != null && rawFeatureId != null) {
+            viewAnnotationController.addWithLayerFeature(
+                id = annotationId,
+                layoutName = config.layoutName,
+                associatedLayerId = config.associatedSymbolLayerId,
+                featureId = rawFeatureId,
+                data = viewData,
+                anchor = config.anchor,
+                allowOverlap = config.allowOverlap
+            )
+        } else {
+            // Fallback to coordinate-based (legacy behavior)
+            viewAnnotationController.add(
+                id = annotationId,
+                layoutName = config.layoutName,
+                latitude = geometry.latitude(),
+                longitude = geometry.longitude(),
+                data = viewData,
+                anchor = config.anchor,
+                allowOverlap = config.allowOverlap
+            )
+        }
 
         featureAnnotations[config.id]?.add(annotationId)
         Log.d(TAG, "Created annotation $annotationId for feature $featureId")
