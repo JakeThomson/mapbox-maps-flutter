@@ -31,7 +31,6 @@ class ViewLayerSymbolBindingExampleState
     // Set up tap listener for view annotations
     mapboxMap.setOnViewAnnotationTapListener(
         (String id, Map<String, dynamic> data) {
-      debugPrint('View annotation tapped: $id');
       _toggleSelection(id);
     });
   }
@@ -60,7 +59,18 @@ class ViewLayerSymbolBindingExampleState
         ),
       );
 
-      // STEP 1: Add the Symbol Layer FIRST
+      // STEP 1: Add a Circle Layer for every point (always visible, allows overlap)
+      await map.style.addLayer(
+        CircleLayer(
+          id: "poi-circles",
+          sourceId: "test-poi-source",
+          sourceLayer: "places_layer",
+        )
+          ..circleRadius = 2.0
+          ..circleColor = Colors.blueAccent.toARGB32()
+      );
+
+      // STEP 2: Add the Symbol Layer
       // This layer contains the features that view annotations will bind to.
       await map.style.addLayer(
         SymbolLayer(
@@ -68,19 +78,25 @@ class ViewLayerSymbolBindingExampleState
           sourceId: "test-poi-source",
           sourceLayer: "places_layer",
         )
+          // Invisible icon to reserve space for the centered view annotation
+          ..iconImage = ""
+          ..iconPadding = 24.0
+          ..iconAllowOverlap = false
+          // Text label offset to the right
           ..textField = "{title}"
           ..textOffset = [1.5, 0.0]
           ..textAnchor = TextAnchor.LEFT
+          ..textJustify = TextJustify.LEFT
           ..textSize = 12.0
-          ..textColor = Colors.black.value
-          ..textHaloColor = Colors.white.value
+          ..textColor = Colors.black.toARGB32()
+          ..textHaloColor = Colors.white.toARGB32()
           ..textHaloWidth = 1.0
+          ..textPadding = 16.0
           ..textOptional = false
-          ..textAllowOverlap = false
-          ..iconAllowOverlap = false,
+          ..textAllowOverlap = false,
       );
 
-      // STEP 2: Add the ViewLayer with symbol layer binding
+      // STEP 3: Add the ViewLayer with symbol layer binding
       await map.style.addLayer(ViewLayer(
         id: "poi-views",
         sourceId: "test-poi-source",
@@ -93,11 +109,11 @@ class ViewLayerSymbolBindingExampleState
           'backgroundColor': ConstantValue(Colors.blueAccent.toARGB32()),
           'selected': ConstantValue(false),
         },
-        anchor: ViewAnnotationAnchor.RIGHT,
+        anchor: ViewAnnotationAnchor.CENTER,
         allowOverlap: true,
       ));
     } catch (e) {
-      debugPrint('Error setting up style: $e');
+      // Style setup failed
     }
   }
 
