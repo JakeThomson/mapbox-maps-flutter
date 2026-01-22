@@ -1,8 +1,10 @@
 @_spi(Experimental) import MapboxMaps
 import Foundation
 import Flutter
+import os.log
 
 final class StyleController: StyleManager {
+    private let logger = OSLog(subsystem: "com.mapbox.maps.mapbox_maps", category: "StyleController")
     private static let errorCode = "0"
 
     private let styleManager: MapboxMaps.StyleManager
@@ -170,6 +172,7 @@ final class StyleController: StyleManager {
 
     func addStyleSource(sourceId: String, properties: String, completion: @escaping (Result<Void, Error>) -> Void) {
         do {
+            let propertiesDict = convertStringToDictionary(properties: properties)
             try styleManager.addSource(withId: sourceId, properties: propertiesDict)
             completion(.success(()))
         } catch {
