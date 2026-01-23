@@ -31,9 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mapbox.maps.mapbox_maps.LocalRequestRemeasure
 import com.mapbox.maps.mapbox_maps.LocalViewAnnotationVisible
-import kotlinx.coroutines.delay
 
 @Composable
 fun CalloutView(
@@ -44,9 +42,6 @@ fun CalloutView(
 ) {
     // Visibility state from Mapbox collision detection
     val isVisible by LocalViewAnnotationVisible.current
-
-    // Remeasure callback to notify parent when size changes
-    val requestRemeasure = LocalRequestRemeasure.current
 
     // Visibility animation (for collision detection show/hide)
     val visibilityScale by animateFloatAsState(
@@ -79,9 +74,6 @@ fun CalloutView(
         } else {
             // On subsequent changes, animate to the new value
             animatedSelected.value = selected
-            // Wait for animation to complete, then request remeasure
-            delay(300) // Match animation duration
-            requestRemeasure?.invoke()
         }
     }
 

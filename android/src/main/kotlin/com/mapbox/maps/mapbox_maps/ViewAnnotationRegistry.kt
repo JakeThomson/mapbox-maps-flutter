@@ -31,24 +31,6 @@ val LocalViewAnnotationVisible = compositionLocalOf<State<Boolean>> {
     mutableStateOf(true)
 }
 
-/**
- * CompositionLocal providing a callback to request the view annotation container be remeasured.
- *
- * Call this after your view finishes resizing (e.g., after an animation completes)
- * to update the Mapbox container size.
- *
- * Example usage:
- * ```kotlin
- * val requestRemeasure = LocalRequestRemeasure.current
- *
- * LaunchedEffect(selected) {
- *     delay(300) // Wait for animation to complete
- *     requestRemeasure?.invoke()
- * }
- * ```
- */
-val LocalRequestRemeasure = compositionLocalOf<(() -> Unit)?> { null }
-
 typealias ViewAnnotationFactory = @Composable (Map<String, Any?>) -> Unit
 
 object ViewAnnotationRegistry {
