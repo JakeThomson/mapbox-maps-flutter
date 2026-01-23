@@ -1,21 +1,23 @@
 import SwiftUI
 import UIKit
+import mapbox_maps_flutter
 
 // MARK: - View Model
 class CalloutViewModel: ObservableObject {
     @Published var emoji: String = ""
     @Published var selected: Bool = false
+    @Published var isVisible: Bool = false
 }
 
 // MARK: - SwiftUI View
 struct CalloutViewContent: View {
     @ObservedObject var viewModel: CalloutViewModel
-    
+
     // Constants
     private let smallSize: CGFloat = 32
     private let largeSize: CGFloat = 48
     private let arrowHeight: CGFloat = 10
-    
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
@@ -59,8 +61,12 @@ struct CalloutViewContent: View {
         }
         // This is the magic sauce:
         // We allow the content to exceed the bounds during animation if needed
-        .compositingGroup() 
+        .compositingGroup()
         .animation(.spring(response: 0.4, dampingFraction: 0.6), value: viewModel.selected)
+        // Visibility animation for collision detection
+        .scaleEffect(viewModel.isVisible ? 1 : 0.1)
+        .opacity(viewModel.isVisible ? 1 : 0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: viewModel.isVisible)
     }
 }
 
@@ -77,10 +83,23 @@ struct Triangle: Shape {
 }
 
 // MARK: - UIKit Wrapper
-class CalloutView: UIView {
-    
+class CalloutView: UIView, AnimatedViewAnnotation {
+
     private let viewModel = CalloutViewModel()
     private var hostingController: UIHostingController<CalloutViewContent>?
+
+    // MARK: - AnimatedViewAnnotation
+
+    func animateVisibilityChange(visible: Bool, completion: (() -> Void)?) {
+        // Update the SwiftUI view model, which triggers the animation
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+            viewModel.isVisible = visible
+        }
+        // Call completion after animation duration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            completion?()
+        }
+    }
     
     // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
     @objc dynamic var emoji: String? {
@@ -121,7 +140,10 @@ class CalloutView: UIView {
     private func setupView() {
         backgroundColor = .clear
         clipsToBounds = false
-        
+
+        // Start hidden, will animate in when visibility changes
+        viewModel.isVisible = false
+
         let contentView = CalloutViewContent(viewModel: viewModel)
         let hostingController = UIHostingController(rootView: contentView)
         hostingController.view.backgroundColor = .clear
