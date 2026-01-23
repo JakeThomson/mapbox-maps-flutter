@@ -52,8 +52,6 @@ class ViewAnnotationController(
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
     private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
     private val annotationFeatures = mutableMapOf<String, FeaturesetFeature?>()  // Store FeaturesetFeature for tap callback
-    private val sizeListeners = mutableMapOf<String, View.OnLayoutChangeListener>()  // Track size change listeners
-    private val lastKnownSizes = mutableMapOf<String, Pair<Int, Int>>()  // Track last known sizes (width, height)
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -176,7 +174,6 @@ class ViewAnnotationController(
                     }
 
                     viewAnnotationManager.addViewAnnotation(container, options)
-                    observeSizeChanges(container, id)
                 }
             }
         }
@@ -395,45 +392,6 @@ class ViewAnnotationController(
             "CENTER" -> ViewAnnotationAnchor.CENTER
             else -> ViewAnnotationAnchor.CENTER
         }
-    }
-
-    /// Start observing a view's size changes and update Mapbox when size changes
-    private fun observeSizeChanges(view: View, id: String) {
-        // Store initial size
-        lastKnownSizes[id] = Pair(view.width, view.height)
-
-        val listener = View.OnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
-            val newWidth = right - left
-            val newHeight = bottom - top
-            val lastSize = lastKnownSizes[id]
-
-            // Only update if size actually changed and is valid
-            if (newWidth > 0 && newHeight > 0 && (lastSize == null || newWidth != lastSize.first || newHeight != lastSize.second)) {
-                lastKnownSizes[id] = Pair(newWidth, newHeight)
-
-                // Update Mapbox with new size (use post to avoid layout recursion)
-                mainHandler.post {
-                    if (annotations.containsKey(id)) {
-                        val updateOptions = viewAnnotationOptions {
-                            width(newWidth)
-                            height(newHeight)
-                        }
-                        viewAnnotationManager.updateViewAnnotation(v, updateOptions)
-                    }
-                }
-            }
-        }
-
-        view.addOnLayoutChangeListener(listener)
-        sizeListeners[id] = listener
-    }
-
-    /// Stop observing size changes for a view
-    private fun stopObservingSizeChanges(view: View?, id: String) {
-        sizeListeners.remove(id)?.let { listener ->
-            view?.removeOnLayoutChangeListener(listener)
-        }
-        lastKnownSizes.remove(id)
     }
 
     private fun findActivity(context: Context): Activity? {

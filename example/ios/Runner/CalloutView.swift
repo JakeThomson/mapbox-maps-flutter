@@ -138,7 +138,7 @@ class CalloutView: UIView {
     }
 
     private func setupView() {
-        backgroundColor = .red
+        backgroundColor = .clear
         clipsToBounds = false
 
         viewModel.visibility = visibility
