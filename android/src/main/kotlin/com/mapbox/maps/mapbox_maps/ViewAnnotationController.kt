@@ -27,7 +27,11 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.mapbox.geojson.Feature
 import com.mapbox.geojson.Point
+import com.mapbox.maps.mapbox_maps.pigeons.FeaturesetDescriptor
+import com.mapbox.maps.mapbox_maps.pigeons.FeaturesetFeature
+import com.mapbox.maps.mapbox_maps.pigeons.FeaturesetFeatureId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import com.mapbox.maps.MapView
@@ -47,6 +51,9 @@ class ViewAnnotationController(
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
     private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
+    private val annotationFeatures = mutableMapOf<String, FeaturesetFeature?>()  // Store FeaturesetFeature for tap callback
+    private val sizeListeners = mutableMapOf<String, View.OnLayoutChangeListener>()  // Track size change listeners
+    private val lastKnownSizes = mutableMapOf<String, Pair<Int, Int>>()  // Track last known sizes (width, height)
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -123,11 +130,15 @@ class ViewAnnotationController(
         val visibilityState = mutableStateOf(true)
         visibilityStates[id] = visibilityState
 
+        // For manual annotations, feature is null
+        annotationFeatures[id] = null
+
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
             val tapData = annotationData[id] ?: emptyMap()
+            val feature = annotationFeatures[id]
             tapEventChannel.invokeMethod("onTap", mapOf(
-                "id" to id,
+                "feature" to serializeFeature(feature),
                 "data" to tapData
             ))
         }
@@ -165,6 +176,7 @@ class ViewAnnotationController(
                     }
 
                     viewAnnotationManager.addViewAnnotation(container, options)
+                    observeSizeChanges(container, id)
                 }
             }
         }
@@ -181,7 +193,9 @@ class ViewAnnotationController(
         featureId: String,
         data: Map<String, Any?>?,
         anchor: String?,
-        allowOverlap: Boolean
+        allowOverlap: Boolean,
+        viewLayerId: String? = null,
+        feature: Feature? = null
     ): Result<Unit> {
         if (annotations.containsKey(id)) {
             return Result.failure(Exception("Annotation with id '$id' already exists"))
@@ -218,6 +232,18 @@ class ViewAnnotationController(
         annotationData[id] = data ?: emptyMap()
         viewLayerAnnotations.add(id)  // Mark as ViewLayer annotation
 
+        // Build and store FeaturesetFeature for tap callback
+        val featuresetFeature = feature?.let {
+            FeaturesetFeature(
+                id = FeaturesetFeatureId(featureId, null),
+                featureset = FeaturesetDescriptor(null, null, viewLayerId),
+                geometry = it.geometry()?.toMap() ?: emptyMap(),
+                properties = it.properties()?.toFilteredMap() ?: emptyMap(),
+                state = emptyMap()
+            )
+        }
+        annotationFeatures[id] = featuresetFeature
+
         // Create visibility state for this annotation (default to visible)
         val visibilityState = mutableStateOf(true)
         visibilityStates[id] = visibilityState
@@ -225,8 +251,9 @@ class ViewAnnotationController(
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
             val tapData = annotationData[id] ?: emptyMap()
+            val storedFeature = annotationFeatures[id]
             tapEventChannel.invokeMethod("onTap", mapOf(
-                "id" to id,
+                "feature" to serializeFeature(storedFeature),
                 "data" to tapData
             ))
         }
@@ -323,6 +350,7 @@ class ViewAnnotationController(
         annotationData.remove(id)
         viewLayerAnnotations.remove(id)
         visibilityStates.remove(id)
+        annotationFeatures.remove(id)
         viewAnnotationManager.removeViewAnnotation(view)
         return Result.success(Unit)
     }
@@ -336,6 +364,22 @@ class ViewAnnotationController(
         annotationData.clear()
         viewLayerAnnotations.clear()
         visibilityStates.clear()
+        annotationFeatures.clear()
+    }
+
+    /// Serialize FeaturesetFeature to a list for method channel.
+    /// The pigeon toList() doesn't recursively serialize nested objects.
+    private fun serializeFeature(feature: FeaturesetFeature?): List<Any?>? {
+        if (feature == null) return null
+
+        val idList: List<Any?>? = feature.id?.let { listOf(it.id, it.namespace) }
+        val featuresetList: List<Any?> = listOf(
+            feature.featureset.featuresetId,
+            feature.featureset.importId,
+            feature.featureset.layerId
+        )
+
+        return listOf(idList, featuresetList, feature.geometry, feature.properties, feature.state)
     }
 
     private fun parseAnchor(anchor: String?): ViewAnnotationAnchor {
@@ -352,7 +396,46 @@ class ViewAnnotationController(
             else -> ViewAnnotationAnchor.CENTER
         }
     }
-    
+
+    /// Start observing a view's size changes and update Mapbox when size changes
+    private fun observeSizeChanges(view: View, id: String) {
+        // Store initial size
+        lastKnownSizes[id] = Pair(view.width, view.height)
+
+        val listener = View.OnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val newWidth = right - left
+            val newHeight = bottom - top
+            val lastSize = lastKnownSizes[id]
+
+            // Only update if size actually changed and is valid
+            if (newWidth > 0 && newHeight > 0 && (lastSize == null || newWidth != lastSize.first || newHeight != lastSize.second)) {
+                lastKnownSizes[id] = Pair(newWidth, newHeight)
+
+                // Update Mapbox with new size (use post to avoid layout recursion)
+                mainHandler.post {
+                    if (annotations.containsKey(id)) {
+                        val updateOptions = viewAnnotationOptions {
+                            width(newWidth)
+                            height(newHeight)
+                        }
+                        viewAnnotationManager.updateViewAnnotation(v, updateOptions)
+                    }
+                }
+            }
+        }
+
+        view.addOnLayoutChangeListener(listener)
+        sizeListeners[id] = listener
+    }
+
+    /// Stop observing size changes for a view
+    private fun stopObservingSizeChanges(view: View?, id: String) {
+        sizeListeners.remove(id)?.let { listener ->
+            view?.removeOnLayoutChangeListener(listener)
+        }
+        lastKnownSizes.remove(id)
+    }
+
     private fun findActivity(context: Context): Activity? {
         var ctx: Context? = context
         while (ctx != null) {

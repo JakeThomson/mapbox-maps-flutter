@@ -57,10 +57,14 @@ class ViewAnnotationExampleState extends State<ViewAnnotationExample> {
     this.mapboxMap = mapboxMap;
     
     // Set up tap listener for view annotations - toggle selection
-    mapboxMap.setOnViewAnnotationTapListener((String id, Map<String, dynamic> data) {
+    mapboxMap.setOnViewAnnotationTapListener((FeaturesetFeature? feature, Map<String, dynamic> data) {
+      // For manual annotations, feature is null - get ID from data map
+      final id = data['_annotationId'] as String?;
       print('View annotation tapped: $id');
       print('Annotation data: $data');
-      _toggleSelection(id);
+      if (id != null) {
+        _toggleSelection(id);
+      }
     });
     
     await mapboxMap.setCamera(
@@ -100,6 +104,7 @@ class ViewAnnotationExampleState extends State<ViewAnnotationExample> {
       layoutName: 'custom_callout',
       coordinate: Point(coordinates: data.position),
       data: {
+        '_annotationId': id, // Include ID for tap callback
         'callout_emoji': data.emoji,
         'callout_label': data.label,
         'backgroundColor': _colorToInt(data.color),

@@ -138,7 +138,7 @@ class CalloutView: UIView {
     }
 
     private func setupView() {
-        backgroundColor = .clear
+        backgroundColor = .red
         clipsToBounds = false
 
         viewModel.visibility = visibility
@@ -151,20 +151,15 @@ class CalloutView: UIView {
 
         NSLayoutConstraint.activate([
             hostingController.view.centerXAnchor.constraint(equalTo: centerXAnchor),
-            hostingController.view.bottomAnchor.constraint(equalTo: bottomAnchor),
-            // Allow the hosting view to grow/shrink with intrinsic content size
-            hostingController.view.widthAnchor.constraint(equalTo: widthAnchor),
-            hostingController.view.heightAnchor.constraint(equalTo: heightAnchor)
+            hostingController.view.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
 
         self.hostingController = hostingController
     }
 
     override var intrinsicContentSize: CGSize {
-        // Calculate exact size needed so the Map SDK allocates the right hit-box
-        let circleSize: CGFloat = selected ? 48 : 32
-        let arrowHeight: CGFloat = selected ? 10 : 0
-        return CGSize(width: circleSize, height: circleSize + arrowHeight)
+        // Delegate to SwiftUI content - the hosting controller knows its actual size
+        return hostingController?.view.intrinsicContentSize ?? .zero
     }
 
 }

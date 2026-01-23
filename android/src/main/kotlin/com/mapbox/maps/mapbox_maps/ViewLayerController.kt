@@ -349,7 +349,9 @@ class ViewLayerController(
                 featureId = rawFeatureId,
                 data = viewData,
                 anchor = config.anchor,
-                allowOverlap = config.allowOverlap
+                allowOverlap = config.allowOverlap,
+                viewLayerId = config.id,
+                feature = feature
             )
         } else {
             // Fallback to coordinate-based (legacy behavior)

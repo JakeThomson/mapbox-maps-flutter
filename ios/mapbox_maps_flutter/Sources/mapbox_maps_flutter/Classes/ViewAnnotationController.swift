@@ -15,6 +15,9 @@ class ViewAnnotationController {
     private var annotationData: [String: [String: Any]] = [:]
     private var viewAnnotationObjects: [String: ViewAnnotation] = [:]  // For layer feature binding
     private var visibilityObjects: [String: ViewAnnotationVisibility] = [:]  // Track visibility state per annotation
+    private var annotationFeatures: [String: FeaturesetFeature?] = [:]  // Store FeaturesetFeature for tap callback
+    private var sizeObservations: [String: NSKeyValueObservation] = [:]  // Track size change observations
+    private var lastKnownSizes: [String: CGSize] = [:]  // Track last known sizes to detect changes
     private let tapEventChannel: FlutterMethodChannel
     
     init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
@@ -81,6 +84,8 @@ class ViewAnnotationController {
             layoutNames[id] = layoutName
             annotationOptions[id] = options
             annotationData[id] = data ?? [:]
+            annotationFeatures[id] = nil  // Manual annotations have no feature
+            observeSizeChanges(for: view, id: id)
             return .success(())
         } catch {
             return .failure(error)
@@ -96,7 +101,9 @@ class ViewAnnotationController {
         featureId: String,
         data: [String: Any]?,
         anchor: String?,
-        allowOverlap: Bool
+        allowOverlap: Bool,
+        viewLayerId: String? = nil,
+        feature: Feature? = nil
     ) -> Result<Void, Error> {
         if annotations[id] != nil {
             return .failure(NSError(
@@ -156,6 +163,21 @@ class ViewAnnotationController {
         layoutNames[id] = layoutName
         annotationData[id] = data ?? [:]
         viewAnnotationObjects[id] = annotation
+        observeSizeChanges(for: view, id: id)
+
+        // Build and store FeaturesetFeature for tap callback
+        if let feature = feature {
+            let featuresetFeature = FeaturesetFeature(
+                id: FeaturesetFeatureId(id: featureId, namespace: nil),
+                featureset: FeaturesetDescriptor(featuresetId: nil, importId: nil, layerId: viewLayerId),
+                geometry: feature.geometry?.toMap() ?? [:],
+                properties: feature.properties?.turfRawValue ?? [:],
+                state: [:]
+            )
+            annotationFeatures[id] = featuresetFeature
+        } else {
+            annotationFeatures[id] = nil
+        }
 
         return .success(())
     }
@@ -378,8 +400,51 @@ class ViewAnnotationController {
         
         return .success(())
     }
-    
+
+    /// Start observing a view's intrinsic content size changes and update Mapbox when size changes
+    private func observeSizeChanges(for view: UIView, id: String) {
+        // Store initial size
+        lastKnownSizes[id] = view.intrinsicContentSize
+
+        // Observe bounds changes (triggered when view resizes)
+        let observation = view.observe(\.bounds, options: [.new]) { [weak self] observedView, _ in
+            guard let self = self else { return }
+
+            let newSize = observedView.intrinsicContentSize
+            let lastSize = self.lastKnownSizes[id] ?? .zero
+
+            // Only update if size actually changed
+            if newSize.width > 0 && newSize.height > 0 && newSize != lastSize {
+                self.lastKnownSizes[id] = newSize
+
+                // Update the view's frame
+                observedView.frame.size = newSize
+
+                // Update Mapbox with new size
+                if self.viewAnnotationObjects[id] != nil {
+                    // For ViewAnnotation API (layer feature binding), size updates automatically
+                    // Just need to invalidate layout
+                    observedView.superview?.setNeedsLayout()
+                } else {
+                    // For legacy API, update via viewAnnotations manager
+                    let options = ViewAnnotationOptions(width: newSize.width, height: newSize.height)
+                    try? self.mapView.viewAnnotations.update(observedView, options: options)
+                }
+            }
+        }
+        sizeObservations[id] = observation
+    }
+
+    /// Stop observing size changes for a view
+    private func stopObservingSizeChanges(for id: String) {
+        sizeObservations.removeValue(forKey: id)
+        lastKnownSizes.removeValue(forKey: id)
+    }
+
     func remove(id: String) -> Result<Void, Error> {
+        // Stop observing size changes
+        stopObservingSizeChanges(for: id)
+
         // Check if using new ViewAnnotation API (layer feature binding)
         if let annotation = viewAnnotationObjects.removeValue(forKey: id) {
             annotation.remove()
@@ -388,6 +453,7 @@ class ViewAnnotationController {
             annotationOptions.removeValue(forKey: id)
             annotationData.removeValue(forKey: id)
             visibilityObjects.removeValue(forKey: id)
+            annotationFeatures.removeValue(forKey: id)
             return .success(())
         }
 
@@ -405,6 +471,7 @@ class ViewAnnotationController {
         annotationOptions.removeValue(forKey: id)
         annotationData.removeValue(forKey: id)
         visibilityObjects.removeValue(forKey: id)
+        annotationFeatures.removeValue(forKey: id)
         return .success(())
     }
 
@@ -424,6 +491,9 @@ class ViewAnnotationController {
         annotationOptions.removeAll()
         annotationData.removeAll()
         visibilityObjects.removeAll()
+        annotationFeatures.removeAll()
+        sizeObservations.removeAll()
+        lastKnownSizes.removeAll()
     }
     
     private func parseAnchor(_ anchor: String?) -> MapboxMaps.ViewAnnotationAnchor {
@@ -460,7 +530,20 @@ class ViewAnnotationController {
             return
         }
         let data = annotationData[annotationId] ?? [:]
-        tapEventChannel.invokeMethod("onTap", arguments: ["id": annotationId, "data": data])
+        let feature = annotationFeatures[annotationId] ?? nil
+
+        // Manually serialize FeaturesetFeature to ensure nested objects are lists
+        var featureList: [Any?]? = nil
+        if let feature = feature {
+            let idList: [Any?]? = feature.id != nil ? [feature.id!.id, feature.id!.namespace] : nil
+            let featuresetList: [Any?] = [feature.featureset.featuresetId, feature.featureset.importId, feature.featureset.layerId]
+            featureList = [idList, featuresetList, feature.geometry, feature.properties, feature.state]
+        }
+
+        tapEventChannel.invokeMethod("onTap", arguments: [
+            "feature": featureList,
+            "data": data
+        ])
     }
 }
 

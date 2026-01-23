@@ -29,11 +29,20 @@ class ViewLayerExampleState extends State<ViewLayerExample> {
     // Set up tap listener for view annotations
     print('=== SETTING UP VIEW ANNOTATION TAP LISTENER ===');
     mapboxMap
-        .setOnViewAnnotationTapListener((String id, Map<String, dynamic> data) {
+        .setOnViewAnnotationTapListener((FeaturesetFeature? feature, Map<String, dynamic> data) {
       print('🎯🎯🎯 TAP DETECTED IN FLUTTER! 🎯🎯🎯');
-      print('   Annotation ID: $id');
-      print('   Data: $data');
-      _toggleSelection(id);
+      if (feature != null) {
+        final viewLayerId = feature.featureset.layerId;
+        final featureId = feature.id?.id;
+        print('   ViewLayer: $viewLayerId, Feature: $featureId');
+        print('   Properties: ${feature.properties}');
+
+        // Construct annotation ID: ${viewLayerId}_${sourceLayer}_${featureId}
+        if (viewLayerId != null && featureId != null) {
+          final annotationId = '${viewLayerId}_places_layer_$featureId';
+          _toggleSelection(annotationId);
+        }
+      }
     });
 
     try {
@@ -133,8 +142,15 @@ class ViewLayerExampleState extends State<ViewLayerExample> {
       );
 
       mapboxMap.setOnViewAnnotationTapListener(
-          (String id, Map<String, dynamic> data) {
-        _toggleSelection(id);
+          (FeaturesetFeature? feature, Map<String, dynamic> data) {
+        if (feature != null) {
+          final viewLayerId = feature.featureset.layerId;
+          final featureId = feature.id?.id;
+          if (viewLayerId != null && featureId != null) {
+            final annotationId = '${viewLayerId}_places_layer_$featureId';
+            _toggleSelection(annotationId);
+          }
+        }
       });
     } catch (e) {
       print('Error adding source/layer: $e');

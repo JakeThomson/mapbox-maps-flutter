@@ -256,12 +256,18 @@ class MapboxMap extends ChangeNotifier {
   OnMapZoomListener? onMapZoomListener;
 
   /// Callback invoked when a view annotation is tapped.
-  /// The [id] parameter is the identifier of the tapped view annotation.
-  /// The [data] parameter contains all the data that was used to render the annotation.
-  void Function(String id, Map<String, dynamic> data)? onViewAnnotationTap;
+  ///
+  /// The [feature] parameter contains the feature information for ViewLayer-created annotations,
+  /// including the ViewLayer ID (`feature.featureset.layerId`), feature ID (`feature.id`),
+  /// original feature properties (`feature.properties`), and geometry (`feature.geometry`).
+  /// For manually created annotations (via `addViewAnnotation`), [feature] will be null.
+  ///
+  /// The [data] parameter contains the mapped view data that was used to render the annotation
+  /// (e.g., `callout_emoji`, `backgroundColor`, `selected`).
+  void Function(FeaturesetFeature? feature, Map<String, dynamic> data)? onViewAnnotationTap;
 
   /// Set the callback for view annotation taps.
-  void setOnViewAnnotationTapListener(void Function(String id, Map<String, dynamic> data)? listener) {
+  void setOnViewAnnotationTapListener(void Function(FeaturesetFeature? feature, Map<String, dynamic> data)? listener) {
     onViewAnnotationTap = listener;
     _mapboxMapsPlatform.onViewAnnotationTap = listener;
   }

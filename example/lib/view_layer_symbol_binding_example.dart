@@ -30,8 +30,21 @@ class ViewLayerSymbolBindingExampleState
 
     // Set up tap listener for view annotations
     mapboxMap.setOnViewAnnotationTapListener(
-        (String id, Map<String, dynamic> data) {
-      _toggleSelection(id);
+        (FeaturesetFeature? feature, Map<String, dynamic> data) {
+      if (feature != null) {
+        // Log feature information for debugging
+        final viewLayerId = feature.featureset.layerId;
+        final featureId = feature.id?.id;
+        print('Tapped ViewLayer: $viewLayerId, feature: $featureId');
+        print('Original properties: ${feature.properties}');
+
+        // Construct annotation ID to toggle selection
+        // Pattern: ${viewLayerId}_${sourceLayer}_${featureId}
+        if (viewLayerId != null && featureId != null) {
+          final annotationId = '${viewLayerId}_places_layer_$featureId';
+          _toggleSelection(annotationId);
+        }
+      }
     });
   }
 

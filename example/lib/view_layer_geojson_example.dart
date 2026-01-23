@@ -59,10 +59,20 @@ class ViewLayerGeoJsonExampleState extends State<ViewLayerGeoJsonExample> {
 
     // Set up tap listener for view annotations
     mapboxMap.setOnViewAnnotationTapListener(
-        (String id, Map<String, dynamic> data) {
-      debugPrint('View annotation tapped: $id');
-      debugPrint('Data: $data');
-      _toggleSelection(id);
+        (FeaturesetFeature? feature, Map<String, dynamic> data) {
+      if (feature != null) {
+        final viewLayerId = feature.featureset.layerId;
+        final featureId = feature.id?.id;
+        debugPrint('View annotation tapped: ViewLayer=$viewLayerId, feature=$featureId');
+        debugPrint('Properties: ${feature.properties}');
+
+        // Construct annotation ID: ${viewLayerId}_default_${featureId}
+        // (default because GeoJSON source has no sourceLayer)
+        if (viewLayerId != null && featureId != null) {
+          final annotationId = '${viewLayerId}_default_$featureId';
+          _toggleSelection(annotationId);
+        }
+      }
     });
   }
 

@@ -11,8 +11,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -98,61 +101,69 @@ fun CalloutView(
         label = "arrowHeight"
     )
 
-    Box(
+    Column(
         modifier = Modifier
-            .size(size)
             .graphicsLayer(
                 scaleX = visibilityScale,
                 scaleY = visibilityScale,
                 alpha = visibilityAlpha
             ),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Background circle with emoji
+        // Circle with emoji and border
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(CircleShape)
-                .background(Color.White),
+            modifier = Modifier.size(size),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = emoji,
-                fontSize = fontSize.sp,
-                textAlign = TextAlign.Center,
-                color = Color.Black
-            )
-        }
-        
-        // Border overlay
-        if (borderWidth > 0) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val centerX = this.size.width / 2
-                val centerY = this.size.height / 2
-                val radius = this.size.minDimension / 2 - borderWidth / 2
-                drawCircle(
-                    color = Color.Black,
-                    radius = radius,
-                    center = androidx.compose.ui.geometry.Offset(centerX, centerY),
-                    style = Stroke(width = borderWidth)
+            // Background circle with emoji
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(Color.White),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = emoji,
+                    fontSize = fontSize.sp,
+                    textAlign = TextAlign.Center,
+                    color = Color.Black
                 )
             }
+
+            // Border overlay
+            if (borderWidth > 0) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val centerX = this.size.width / 2
+                    val centerY = this.size.height / 2
+                    val radius = this.size.minDimension / 2 - borderWidth / 2
+                    drawCircle(
+                        color = Color.Black,
+                        radius = radius,
+                        center = androidx.compose.ui.geometry.Offset(centerX, centerY),
+                        style = Stroke(width = borderWidth)
+                    )
+                }
+            }
         }
-        
-        // Arrow pointing down
+
+        // Arrow pointing down (measured as part of layout)
         if (arrowHeight > 0) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
+            Canvas(
+                modifier = Modifier
+                    .width(16.dp)
+                    .height(arrowHeight.dp)
+            ) {
                 val centerX = this.size.width / 2
-                val bottomY = this.size.height
-                val arrowWidth = 16f
-                
+                val arrowWidth = this.size.width
+
                 val path = Path().apply {
-                    moveTo(centerX, bottomY)
-                    lineTo(centerX - arrowWidth / 2, bottomY + arrowHeight)
-                    lineTo(centerX + arrowWidth / 2, bottomY + arrowHeight)
+                    moveTo(centerX, 0f)
+                    lineTo(centerX - arrowWidth / 2, this@Canvas.size.height)
+                    lineTo(centerX + arrowWidth / 2, this@Canvas.size.height)
                     close()
                 }
-                
+
                 drawPath(path, color = Color.Black)
             }
         }

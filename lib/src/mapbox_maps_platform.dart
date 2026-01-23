@@ -13,7 +13,7 @@ class _MapboxMapsPlatform {
       binaryMessenger);
   final BinaryMessenger binaryMessenger;
   final int channelSuffix;
-  Function(String, Map<String, dynamic>)? onViewAnnotationTap;
+  Function(FeaturesetFeature?, Map<String, dynamic>)? onViewAnnotationTap;
 
   _MapboxMapsPlatform(
       {required this.binaryMessenger, required this.channelSuffix}) {
@@ -34,14 +34,54 @@ class _MapboxMapsPlatform {
   Future<dynamic> _handleViewAnnotationTap(MethodCall call) async {
     if (call.method == "onTap" && call.arguments is Map) {
       final args = call.arguments as Map;
-      final id = args['id'] as String?;
+      final featureList = args['feature'] as List<Object?>?;
       final data = args['data'] as Map<dynamic, dynamic>?;
-      if (id != null && onViewAnnotationTap != null) {
+      if (onViewAnnotationTap != null) {
+        // Parse FeaturesetFeature from the raw list if present
+        final feature = _decodeFeaturesetFeature(featureList);
         // Convert Map<dynamic, dynamic> to Map<String, dynamic>
         final dataMap = data?.map((key, value) => MapEntry(key.toString(), value)) ?? <String, dynamic>{};
-        onViewAnnotationTap!(id, dataMap);
+        onViewAnnotationTap!(feature, dataMap);
       }
     }
+  }
+
+  /// Decode a FeaturesetFeature from a raw platform channel list.
+  /// The list structure is: [id, featureset, geometry, properties, state]
+  /// where id and featureset are also nested lists.
+  FeaturesetFeature? _decodeFeaturesetFeature(List<Object?>? list) {
+    if (list == null) return null;
+
+    // Decode id (FeaturesetFeatureId) - list[0] is [id, namespace]
+    FeaturesetFeatureId? id;
+    if (list[0] != null) {
+      final idList = list[0] as List<Object?>;
+      id = FeaturesetFeatureId(
+        id: idList[0] as String,
+        namespace: idList[1] as String?,
+      );
+    }
+
+    // Decode featureset (FeaturesetDescriptor) - list[1] is [featuresetId, importId, layerId]
+    final featuresetList = list[1] as List<Object?>;
+    final featureset = FeaturesetDescriptor(
+      featuresetId: featuresetList[0] as String?,
+      importId: featuresetList[1] as String?,
+      layerId: featuresetList[2] as String?,
+    );
+
+    // geometry, properties, state are already maps
+    final geometry = (list[2] as Map<Object?, Object?>?)?.cast<String?, Object?>() ?? {};
+    final properties = (list[3] as Map<Object?, Object?>?)?.cast<String, Object?>() ?? {};
+    final state = (list[4] as Map<Object?, Object?>?)?.cast<String, Object?>() ?? {};
+
+    return FeaturesetFeature(
+      id: id,
+      featureset: featureset,
+      geometry: geometry,
+      properties: properties,
+      state: state,
+    );
   }
 
   Widget buildView(
