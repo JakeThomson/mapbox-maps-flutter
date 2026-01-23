@@ -3,6 +3,13 @@ import Flutter
 import ObjectiveC
 @_spi(Experimental) import MapboxMaps
 
+/// Protocol for view annotations that can resize dynamically.
+/// Implement this protocol and call `requestRemeasure?()` after your view finishes resizing
+/// (e.g., after an animation completes) to update the Mapbox container size.
+@objc public protocol ResizableViewAnnotation: AnyObject {
+    var requestRemeasure: (() -> Void)? { get set }
+}
+
 private struct AssociatedKeys {
     static var annotationId = "annotationId"
 }
@@ -83,6 +90,7 @@ class ViewAnnotationController {
             annotationOptions[id] = options
             annotationData[id] = data ?? [:]
             annotationFeatures[id] = nil  // Manual annotations have no feature
+            setupRemeasureCallback(for: view)
             return .success(())
         } catch {
             return .failure(error)
@@ -160,6 +168,7 @@ class ViewAnnotationController {
         layoutNames[id] = layoutName
         annotationData[id] = data ?? [:]
         viewAnnotationObjects[id] = annotation
+        setupRemeasureCallback(for: view)
 
         // Build and store FeaturesetFeature for tap callback
         if let feature = feature {
@@ -395,6 +404,21 @@ class ViewAnnotationController {
         }
         
         return .success(())
+    }
+
+    /// Set up the remeasure callback for views that implement ResizableViewAnnotation.
+    /// When the view calls requestRemeasure(), we re-measure and update Mapbox with the new size.
+    private func setupRemeasureCallback(for view: UIView) {
+        guard let resizable = view as? ResizableViewAnnotation else { return }
+
+        resizable.requestRemeasure = { [weak self, weak view] in
+            guard let self = self, let view = view else { return }
+            let newSize = view.intrinsicContentSize
+            if newSize.width > 0 && newSize.height > 0 {
+                let options = ViewAnnotationOptions(width: newSize.width, height: newSize.height)
+                try? self.mapView.viewAnnotations.update(view, options: options)
+            }
+        }
     }
 
     func remove(id: String) -> Result<Void, Error> {

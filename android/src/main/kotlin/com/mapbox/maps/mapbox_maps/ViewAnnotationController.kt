@@ -151,8 +151,28 @@ class ViewAnnotationController(
         container.visibility = View.INVISIBLE
         rootView.addView(container)
 
+        // Create remeasure callback for this annotation
+        val remeasureCallback: () -> Unit = {
+            if (annotations.containsKey(id)) {
+                container.post {
+                    val newWidth = container.width
+                    val newHeight = container.height
+                    if (newWidth > 0 && newHeight > 0) {
+                        val updateOptions = viewAnnotationOptions {
+                            width(newWidth)
+                            height(newHeight)
+                        }
+                        viewAnnotationManager.updateViewAnnotation(container, updateOptions)
+                    }
+                }
+            }
+        }
+
         composeView.setContent {
-            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+            CompositionLocalProvider(
+                LocalViewAnnotationVisible provides visibilityState,
+                LocalRequestRemeasure provides remeasureCallback
+            ) {
                 factory(data ?: emptyMap())
             }
         }
@@ -265,8 +285,28 @@ class ViewAnnotationController(
         container.visibility = View.INVISIBLE
         rootView.addView(container)
 
+        // Create remeasure callback for this annotation
+        val remeasureCallback: () -> Unit = {
+            if (annotations.containsKey(id)) {
+                container.post {
+                    val newWidth = container.width
+                    val newHeight = container.height
+                    if (newWidth > 0 && newHeight > 0) {
+                        val updateOptions = viewAnnotationOptions {
+                            width(newWidth)
+                            height(newHeight)
+                        }
+                        viewAnnotationManager.updateViewAnnotation(container, updateOptions)
+                    }
+                }
+            }
+        }
+
         composeView.setContent {
-            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+            CompositionLocalProvider(
+                LocalViewAnnotationVisible provides visibilityState,
+                LocalRequestRemeasure provides remeasureCallback
+            ) {
                 factory(data ?: emptyMap())
             }
         }
