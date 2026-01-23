@@ -332,16 +332,14 @@ class ViewAnnotationController {
     
     private func sizeView(_ view: UIView, id: String) -> Result<Void, Error> {
         // Temporarily add to a container view to force layout calculation
-        let containerView = UIView(frame: CGRect(x: -10000, y: -10000, width: 1000, height: 1000))
+        let containerView = UIView(frame: CGRect(x: -10000, y: -10000, width: 1, height: 1))
         containerView.isHidden = true
         containerView.addSubview(view)
         
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            view.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
-            view.leadingAnchor.constraint(greaterThanOrEqualTo: containerView.leadingAnchor),
-            view.bottomAnchor.constraint(lessThanOrEqualTo: containerView.bottomAnchor),
-            view.trailingAnchor.constraint(lessThanOrEqualTo: containerView.trailingAnchor),
+            view.topAnchor.constraint(equalTo: containerView.topAnchor),
+            view.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
         ])
         
         var window: UIWindow?
@@ -375,12 +373,30 @@ class ViewAnnotationController {
         // Try to get size from intrinsic content size first
         var finalSize = view.intrinsicContentSize
         
-        // If intrinsic size is invalid, try systemLayoutSizeFitting
-        if finalSize.width <= 0 || finalSize.height <= 0 {
-            finalSize = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        if finalSize.width == UIView.noIntrinsicMetric || finalSize.height == UIView.noIntrinsicMetric {
+            finalSize = .zero
         }
         
-        // If still invalid, use frame size
+        // If intrinsic size is invalid, try systemLayoutSizeFitting
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            finalSize = view.systemLayoutSizeFitting(
+                UIView.layoutFittingCompressedSize,
+                withHorizontalFittingPriority: .fittingSizeLevel,
+                verticalFittingPriority: .fittingSizeLevel
+            )
+        }
+        
+        // If still invalid, try sizeThatFits
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            finalSize = view.sizeThatFits(
+                CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            )
+        }
+        
+        // If still invalid, use bounds/frame size
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            finalSize = view.bounds.size
+        }
         if finalSize.width <= 0 || finalSize.height <= 0 {
             finalSize = view.frame.size
         }

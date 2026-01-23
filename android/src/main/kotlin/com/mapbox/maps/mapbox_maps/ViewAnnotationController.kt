@@ -147,6 +147,8 @@ class ViewAnnotationController(
         // Wait for composition and layout
         composeView.post {
             composeView.post {
+                updateMeasuredSize(container)
+                
                 // Remove from root view
                 rootView.removeView(container)
                 container.visibility = View.VISIBLE
@@ -244,6 +246,8 @@ class ViewAnnotationController(
         // Wait for composition and layout
         composeView.post {
             composeView.post {
+                updateMeasuredSize(container)
+                
                 // Remove from root view
                 rootView.removeView(container)
                 container.visibility = View.VISIBLE
@@ -347,6 +351,18 @@ class ViewAnnotationController(
             "BOTTOM_RIGHT" -> ViewAnnotationAnchor.BOTTOM_RIGHT
             "CENTER" -> ViewAnnotationAnchor.CENTER
             else -> ViewAnnotationAnchor.CENTER
+        }
+    }
+    
+    private fun updateMeasuredSize(container: FrameLayout) {
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        container.measure(widthSpec, heightSpec)
+        val measuredWidth = container.measuredWidth
+        val measuredHeight = container.measuredHeight
+        if (measuredWidth > 0 && measuredHeight > 0) {
+            container.layout(0, 0, measuredWidth, measuredHeight)
+            container.layoutParams = ViewGroup.LayoutParams(measuredWidth, measuredHeight)
         }
     }
     
