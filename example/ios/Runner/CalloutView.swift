@@ -86,11 +86,14 @@ struct Triangle: Shape {
 }
 
 // MARK: - UIKit Wrapper
-class CalloutView: UIView {
+class CalloutView: UIView, ResizableViewAnnotation {
 
     private let viewModel = CalloutViewModel()
     private var visibility: ViewAnnotationVisibility
     private var hostingController: UIHostingController<CalloutViewContent>?
+
+    // ResizableViewAnnotation protocol - called by ViewAnnotationController
+    var requestRemeasure: (() -> Void)?
 
     // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
     @objc dynamic var emoji: String? {
@@ -111,7 +114,10 @@ class CalloutView: UIView {
             UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0, options: [], animations: {
                 self.invalidateIntrinsicContentSize()
                 self.superview?.layoutIfNeeded()
-            }, completion: nil)
+            }, completion: { _ in
+                // Notify the ViewAnnotationController to update Mapbox with the new size
+                self.requestRemeasure?()
+            })
         }
     }
 
