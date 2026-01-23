@@ -132,45 +132,6 @@ class ViewAnnotationController {
         annotation.variableAnchors = [ViewAnnotationAnchorConfig(anchor: parseAnchor(anchor))]
         annotation.allowOverlap = allowOverlap
 
-        // Set up visibility change callback for animations
-        // If view conforms to AnimatedViewAnnotation, let it handle its own animation
-        // Otherwise, use default scale+fade animation
-        annotation.onVisibilityChanged = { [weak view] isVisible in
-            guard let view = view else { return }
-
-            if let animatedView = view as? AnimatedViewAnnotation {
-                // Let the view handle its own animation
-                animatedView.animateVisibilityChange(visible: isVisible, completion: nil)
-            } else {
-                // Default animation: scale + fade
-                if isVisible {
-                    UIView.animate(
-                        withDuration: 0.2,
-                        delay: 0,
-                        options: .curveEaseOut,
-                        animations: {
-                            view.transform = .identity
-                            view.alpha = 1
-                        }
-                    )
-                } else {
-                    UIView.animate(
-                        withDuration: 0.15,
-                        delay: 0,
-                        options: .curveEaseIn,
-                        animations: {
-                            view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
-                            view.alpha = 0
-                        }
-                    )
-                }
-            }
-        }
-
-        // Initialize view state for animation (start hidden, will animate in when visible)
-        view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
-        view.alpha = 0
-
         // Add tap gesture recognizer
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         view.addGestureRecognizer(tapGesture)

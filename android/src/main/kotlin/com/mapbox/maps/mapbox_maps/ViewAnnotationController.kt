@@ -11,8 +11,6 @@ import android.widget.FrameLayout
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import androidx.compose.runtime.Recomposer
-import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.AndroidUiDispatcher
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
@@ -44,34 +42,21 @@ class ViewAnnotationController(
     private val layoutNames = mutableMapOf<String, String>()
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
-    private val visibilityStates = mutableMapOf<View, androidx.compose.runtime.MutableState<Boolean>>()  // Visibility state for Compose animations
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
-
+    
     private val tapEventChannel = MethodChannel(messenger, "plugins.flutter.io.$channelSuffix/viewAnnotationTap")
-
+    
     private val composeLifecycleOwner = ComposeLifecycleOwner()
     private val coroutineScope = CoroutineScope(AndroidUiDispatcher.Main)
     private val recomposer = Recomposer(coroutineScope.coroutineContext)
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    private val visibilityListener = OnViewAnnotationUpdatedListener { updatedViews ->
-        for (view in updatedViews) {
-            val visibilityState = visibilityStates[view] ?: continue
-            val isVisible = view.visibility == View.VISIBLE
-
-            if (visibilityState.value != isVisible) {
-                visibilityState.value = isVisible
-            }
-        }
-    }
-
+    
     init {
         coroutineScope.launch {
             recomposer.runRecomposeAndApplyChanges()
         }
-        viewAnnotationManager.addOnViewAnnotationUpdatedListener(visibilityListener)
     }
 
     fun add(
@@ -103,18 +88,14 @@ class ViewAnnotationController(
                 FrameLayout.LayoutParams.WRAP_CONTENT
             )
         }
-
+        
         container.setViewTreeLifecycleOwner(composeLifecycleOwner)
         container.setViewTreeViewModelStoreOwner(composeLifecycleOwner)
         container.setViewTreeSavedStateRegistryOwner(composeLifecycleOwner)
-
+        
         composeView.setParentCompositionContext(recomposer)
 
         container.addView(composeView)
-
-        // Create visibility state for this annotation (starts visible for non-ViewLayer annotations)
-        val visibilityState = mutableStateOf(true)
-        visibilityStates[container] = visibilityState
 
         // Store references before async operation
         annotations[id] = container
@@ -141,7 +122,7 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            factory(data ?: emptyMap(), visibilityState)
+            factory(data ?: emptyMap())
         }
 
         // Wait for composition and layout
@@ -208,10 +189,6 @@ class ViewAnnotationController(
 
         container.addView(composeView)
 
-        // Create visibility state for this annotation (starts hidden for ViewLayer annotations)
-        val visibilityState = mutableStateOf(false)
-        visibilityStates[container] = visibilityState
-
         // Store references before async operation
         annotations[id] = container
         layoutNames[id] = layoutName
@@ -238,7 +215,7 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            factory(data ?: emptyMap(), visibilityState)
+            factory(data ?: emptyMap())
         }
 
         // Wait for composition and layout
@@ -280,16 +257,15 @@ class ViewAnnotationController(
         if (data != null && view is FrameLayout) {
             // Update stored data
             annotationData[id] = data
-
+            
             val composeView = view.getChildAt(0) as? ComposeView
             if (composeView != null) {
                 val layoutName = layoutNames[id]
-                val visibilityState = visibilityStates[view] ?: mutableStateOf(true)
                 if (layoutName != null) {
                     val factory = ViewAnnotationRegistry.getFactory(layoutName)
                     if (factory != null) {
                         composeView.setContent {
-                            factory(data, visibilityState)
+                            factory(data)
                         }
                     }
                 }
@@ -314,7 +290,6 @@ class ViewAnnotationController(
         layoutNames.remove(id)
         annotationData.remove(id)
         viewLayerAnnotations.remove(id)
-        visibilityStates.remove(view)
         viewAnnotationManager.removeViewAnnotation(view)
         return Result.success(Unit)
     }
@@ -327,12 +302,6 @@ class ViewAnnotationController(
         layoutNames.clear()
         annotationData.clear()
         viewLayerAnnotations.clear()
-        visibilityStates.clear()
-    }
-
-    fun dispose() {
-        viewAnnotationManager.removeOnViewAnnotationUpdatedListener(visibilityListener)
-        removeAll()
     }
 
     private fun parseAnchor(anchor: String?): ViewAnnotationAnchor {

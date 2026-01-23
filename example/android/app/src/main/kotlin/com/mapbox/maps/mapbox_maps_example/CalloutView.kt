@@ -3,12 +3,9 @@ package com.mapbox.maps.mapbox_maps_example
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.Spring
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.State
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -21,12 +18,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -37,23 +31,8 @@ fun CalloutView(
     emoji: String,
     label: String,
     backgroundColor: Color = Color(0xFF3B82F6),
-    selected: Boolean = false,
-    isVisible: State<Boolean>? = null
+    selected: Boolean = false
 ) {
-    // Visibility animation (for collision detection show/hide)
-    val scale by animateFloatAsState(
-        targetValue = if (isVisible?.value != false) 1f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "visibilityScale"
-    )
-    val alpha by animateFloatAsState(
-        targetValue = if (isVisible?.value != false) 1f else 0f,
-        animationSpec = tween(durationMillis = if (isVisible?.value != false) 200 else 150),
-        label = "visibilityAlpha"
-    )
     // Track if this is the first composition
     val isFirstComposition = remember { mutableStateOf(true) }
     
@@ -98,13 +77,7 @@ fun CalloutView(
     )
     
     Box(
-        modifier = Modifier
-            .size(size)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                this.alpha = alpha
-            },
+        modifier = Modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
         // Background circle with emoji
