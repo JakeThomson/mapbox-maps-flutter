@@ -194,7 +194,7 @@ class ViewLayerController {
         }
 
         let pigeonOptions = RenderedQueryOptions(
-            layerIds: nil,
+            layerIds: config.associatedSymbolLayerId != nil ? [config.associatedSymbolLayerId!] : nil,
             filter: filterString
         )
 

@@ -205,7 +205,7 @@ class ViewLayerController(
             // Query rendered features - use null layerIds to query all layers,
             // then filter by source and sourceLayer below
             val options = RenderedQueryOptions(
-                null,  // Query all layers, filter by source below
+                config.associatedSymbolLayerId?.let { listOf(it) },
                 config.filter
             )
 

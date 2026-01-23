@@ -72,15 +72,21 @@ class ViewLayerSymbolBindingExampleState
         ),
       );
 
-      // STEP 1: Add a Circle Layer for every point (always visible, allows overlap)
       await map.style.addLayer(
-        CircleLayer(
-          id: "poi-circles",
-          sourceId: "test-poi-source",
-          sourceLayer: "places_layer",
-        )
-          ..circleRadius = 2.0
-          ..circleColor = Colors.blueAccent.toARGB32()
+        SymbolLayer(
+            id: 'poi-dots',
+            sourceId: 'test-poi-source',
+            sourceLayer: 'places_layer',
+          )
+          ..symbolSortKeyExpression = ['get', 'rank']
+          ..textField = '•'
+          ..textColor = Colors.black.toARGB32()
+          ..textHaloColor = Colors.white.toARGB32()
+          ..textHaloWidth = 1.5
+          ..textAllowOverlap = false
+          ..minZoom = 0.0
+          ..maxZoom = 11.0
+          ..textPadding = 3.0,
       );
 
       // STEP 2: Add the Symbol Layer
