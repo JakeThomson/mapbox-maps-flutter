@@ -10,8 +10,9 @@ import Flutter
   ) -> Bool {
       GeneratedPluginRegistrant.register(with: self)
       
-      ViewAnnotationRegistry.shared.register(viewIdentifier: "custom_callout") { args in
-          let view = CalloutView()
+      // Register with visibility support for entrance/exit animations
+      ViewAnnotationRegistry.shared.register(viewIdentifier: "custom_callout") { args, visibility in
+          let view = CalloutView(visibility: visibility)
           if let emoji = args?["callout_emoji"] as? String {
               view.emoji = emoji
           }

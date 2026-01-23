@@ -1,7 +1,9 @@
 package com.mapbox.maps.mapbox_maps_example
 
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -21,10 +23,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mapbox.maps.mapbox_maps.LocalViewAnnotationVisible
 
 @Composable
 fun CalloutView(
@@ -33,13 +37,31 @@ fun CalloutView(
     backgroundColor: Color = Color(0xFF3B82F6),
     selected: Boolean = false
 ) {
+    // Visibility state from Mapbox collision detection
+    val isVisible by LocalViewAnnotationVisible.current
+
+    // Visibility animation (for collision detection show/hide)
+    val visibilityScale by animateFloatAsState(
+        targetValue = if (isVisible) 1f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "visibilityScale"
+    )
+    val visibilityAlpha by animateFloatAsState(
+        targetValue = if (isVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = if (isVisible) 200 else 150),
+        label = "visibilityAlpha"
+    )
+
     // Track if this is the first composition
     val isFirstComposition = remember { mutableStateOf(true) }
-    
+
     // Use a state that starts from false on first composition, then animates to selected
     // This ensures animations always have a starting point
     val animatedSelected = remember { mutableStateOf(false) }
-    
+
     // Update animatedSelected when selected changes
     LaunchedEffect(selected) {
         if (isFirstComposition.value) {
@@ -51,33 +73,39 @@ fun CalloutView(
             animatedSelected.value = selected
         }
     }
-    
+
     val size by animateDpAsState(
         targetValue = if (animatedSelected.value) 48.dp else 32.dp,
         animationSpec = tween(durationMillis = 300),
         label = "size"
     )
-    
+
     val fontSize by animateFloatAsState(
         targetValue = if (animatedSelected.value) 28f else 24f,
         animationSpec = tween(durationMillis = 300),
         label = "fontSize"
     )
-    
+
     val borderWidth by animateFloatAsState(
         targetValue = if (animatedSelected.value) 4f else 0f,
         animationSpec = tween(durationMillis = 300),
         label = "borderWidth"
     )
-    
+
     val arrowHeight by animateFloatAsState(
         targetValue = if (animatedSelected.value) 12f else 0f,
         animationSpec = tween(durationMillis = 300),
         label = "arrowHeight"
     )
-    
+
     Box(
-        modifier = Modifier.size(size),
+        modifier = Modifier
+            .size(size)
+            .graphicsLayer(
+                scaleX = visibilityScale,
+                scaleY = visibilityScale,
+                alpha = visibilityAlpha
+            ),
         contentAlignment = Alignment.Center
     ) {
         // Background circle with emoji

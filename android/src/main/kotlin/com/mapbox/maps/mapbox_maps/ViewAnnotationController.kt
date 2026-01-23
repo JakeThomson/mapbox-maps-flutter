@@ -10,7 +10,10 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.Recomposer
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.AndroidUiDispatcher
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
@@ -29,6 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import com.mapbox.maps.MapView
 import com.mapbox.maps.ViewAnnotationAnchor
+import com.mapbox.maps.viewannotation.OnViewAnnotationUpdatedListener
 import com.mapbox.maps.viewannotation.ViewAnnotationManager
 import com.mapbox.maps.viewannotation.viewAnnotationOptions
 import com.mapbox.maps.viewannotation.*
@@ -42,6 +46,7 @@ class ViewAnnotationController(
     private val layoutNames = mutableMapOf<String, String>()
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
+    private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -57,6 +62,18 @@ class ViewAnnotationController(
         coroutineScope.launch {
             recomposer.runRecomposeAndApplyChanges()
         }
+
+        // Register listener for visibility changes (e.g., due to collision detection)
+        viewAnnotationManager.addOnViewAnnotationUpdatedListener(
+            object : OnViewAnnotationUpdatedListener {
+                override fun onViewAnnotationVisibilityUpdated(view: View, visible: Boolean) {
+                    // Find annotation ID by view reference and update its visibility state
+                    annotations.entries.find { it.value == view }?.key?.let { id ->
+                        visibilityStates[id]?.value = visible
+                    }
+                }
+            }
+        )
     }
 
     fun add(
@@ -102,6 +119,10 @@ class ViewAnnotationController(
         layoutNames[id] = layoutName
         annotationData[id] = data ?: emptyMap()
 
+        // Create visibility state for this annotation (default to visible)
+        val visibilityState = mutableStateOf(true)
+        visibilityStates[id] = visibilityState
+
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
             val tapData = annotationData[id] ?: emptyMap()
@@ -122,7 +143,9 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            factory(data ?: emptyMap())
+            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+                factory(data ?: emptyMap())
+            }
         }
 
         // Wait for composition and layout
@@ -195,6 +218,10 @@ class ViewAnnotationController(
         annotationData[id] = data ?: emptyMap()
         viewLayerAnnotations.add(id)  // Mark as ViewLayer annotation
 
+        // Create visibility state for this annotation (default to visible)
+        val visibilityState = mutableStateOf(true)
+        visibilityStates[id] = visibilityState
+
         // Set click listener immediately (before any async work)
         container.setOnClickListener {
             val tapData = annotationData[id] ?: emptyMap()
@@ -215,7 +242,9 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            factory(data ?: emptyMap())
+            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+                factory(data ?: emptyMap())
+            }
         }
 
         // Wait for composition and layout
@@ -257,15 +286,18 @@ class ViewAnnotationController(
         if (data != null && view is FrameLayout) {
             // Update stored data
             annotationData[id] = data
-            
+
             val composeView = view.getChildAt(0) as? ComposeView
             if (composeView != null) {
                 val layoutName = layoutNames[id]
                 if (layoutName != null) {
                     val factory = ViewAnnotationRegistry.getFactory(layoutName)
                     if (factory != null) {
+                        val visibilityState = visibilityStates[id] ?: mutableStateOf(true)
                         composeView.setContent {
-                            factory(data)
+                            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+                                factory(data)
+                            }
                         }
                     }
                 }
@@ -290,6 +322,7 @@ class ViewAnnotationController(
         layoutNames.remove(id)
         annotationData.remove(id)
         viewLayerAnnotations.remove(id)
+        visibilityStates.remove(id)
         viewAnnotationManager.removeViewAnnotation(view)
         return Result.success(Unit)
     }
@@ -302,6 +335,7 @@ class ViewAnnotationController(
         layoutNames.clear()
         annotationData.clear()
         viewLayerAnnotations.clear()
+        visibilityStates.clear()
     }
 
     private fun parseAnchor(anchor: String?): ViewAnnotationAnchor {

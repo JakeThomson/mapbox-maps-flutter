@@ -1,21 +1,26 @@
 import SwiftUI
 import UIKit
+import mapbox_maps_flutter
 
 // MARK: - View Model
 class CalloutViewModel: ObservableObject {
     @Published var emoji: String = ""
     @Published var selected: Bool = false
+
+    // Visibility state from Mapbox collision detection
+    var visibility: ViewAnnotationVisibility?
 }
 
 // MARK: - SwiftUI View
 struct CalloutViewContent: View {
     @ObservedObject var viewModel: CalloutViewModel
-    
+    @ObservedObject var visibility: ViewAnnotationVisibility
+
     // Constants
     private let smallSize: CGFloat = 32
     private let largeSize: CGFloat = 48
     private let arrowHeight: CGFloat = 10
-    
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
@@ -35,7 +40,7 @@ struct CalloutViewContent: View {
                     )
                     // Shadow for depth (optional, matches map marker style)
                     .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
-                
+
                 // 2. Emoji Label
                 Text(viewModel.emoji)
                     // Trick: Set font to the LARGEST size, then scale down.
@@ -45,8 +50,8 @@ struct CalloutViewContent: View {
                     .foregroundColor(.black)
             }
             // Ensure the ZStack stays on top of the arrow visually
-            .zIndex(1) 
-            
+            .zIndex(1)
+
             // 3. Arrow Indicator
             Triangle()
                 .fill(Color.black)
@@ -59,7 +64,11 @@ struct CalloutViewContent: View {
         }
         // This is the magic sauce:
         // We allow the content to exceed the bounds during animation if needed
-        .compositingGroup() 
+        .compositingGroup()
+        // Visibility animation (for collision detection show/hide)
+        .scaleEffect(visibility.isVisible ? 1 : 0)
+        .opacity(visibility.isVisible ? 1 : 0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: visibility.isVisible)
         .animation(.spring(response: 0.4, dampingFraction: 0.6), value: viewModel.selected)
     }
 }
@@ -78,15 +87,16 @@ struct Triangle: Shape {
 
 // MARK: - UIKit Wrapper
 class CalloutView: UIView {
-    
+
     private let viewModel = CalloutViewModel()
+    private var visibility: ViewAnnotationVisibility
     private var hostingController: UIHostingController<CalloutViewContent>?
-    
+
     // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
     @objc dynamic var emoji: String? {
         didSet { viewModel.emoji = emoji ?? "" }
     }
-    
+
     // Mark as @objc dynamic to expose to Key-Value Coding for ViewAnnotationController updates
     @objc dynamic var selected: Bool = false {
         didSet {
@@ -94,7 +104,7 @@ class CalloutView: UIView {
             withAnimation {
                 viewModel.selected = selected
             }
-            
+
             // 2. Animate the Mapbox Container Frame
             // Mapbox ViewAnnotations are just UIViews. We need to animate the layout update
             // to smooth out the frame resize (32px -> 48px) so it doesn't clip during animation.
@@ -104,31 +114,41 @@ class CalloutView: UIView {
             }, completion: nil)
         }
     }
-    
+
     // Keep for compatibility, but not used
     @objc dynamic var label: String?
-    
+
+    /// Initialize with visibility object for animation support.
+    init(visibility: ViewAnnotationVisibility) {
+        self.visibility = visibility
+        super.init(frame: .zero)
+        setupView()
+    }
+
     override init(frame: CGRect) {
+        self.visibility = ViewAnnotationVisibility()
         super.init(frame: frame)
         setupView()
     }
-    
+
     required init?(coder: NSCoder) {
+        self.visibility = ViewAnnotationVisibility()
         super.init(coder: coder)
         setupView()
     }
-    
+
     private func setupView() {
         backgroundColor = .clear
         clipsToBounds = false
-        
-        let contentView = CalloutViewContent(viewModel: viewModel)
+
+        viewModel.visibility = visibility
+        let contentView = CalloutViewContent(viewModel: viewModel, visibility: visibility)
         let hostingController = UIHostingController(rootView: contentView)
         hostingController.view.backgroundColor = .clear
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        
+
         addSubview(hostingController.view)
-        
+
         NSLayoutConstraint.activate([
             hostingController.view.centerXAnchor.constraint(equalTo: centerXAnchor),
             hostingController.view.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -136,15 +156,15 @@ class CalloutView: UIView {
             hostingController.view.widthAnchor.constraint(equalTo: widthAnchor),
             hostingController.view.heightAnchor.constraint(equalTo: heightAnchor)
         ])
-        
+
         self.hostingController = hostingController
     }
-    
+
     override var intrinsicContentSize: CGSize {
         // Calculate exact size needed so the Map SDK allocates the right hit-box
         let circleSize: CGFloat = selected ? 48 : 32
         let arrowHeight: CGFloat = selected ? 10 : 0
         return CGSize(width: circleSize, height: circleSize + arrowHeight)
     }
-    
+
 }

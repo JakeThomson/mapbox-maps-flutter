@@ -14,6 +14,7 @@ class ViewAnnotationController {
     private var annotationOptions: [String: ViewAnnotationOptions] = [:]
     private var annotationData: [String: [String: Any]] = [:]
     private var viewAnnotationObjects: [String: ViewAnnotation] = [:]  // For layer feature binding
+    private var visibilityObjects: [String: ViewAnnotationVisibility] = [:]  // Track visibility state per annotation
     private let tapEventChannel: FlutterMethodChannel
     
     init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
@@ -105,7 +106,12 @@ class ViewAnnotationController {
             ))
         }
 
-        guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data) else {
+        // Create visibility object for this annotation
+        let visibility = ViewAnnotationVisibility()
+        visibilityObjects[id] = visibility
+
+        guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data, visibility: visibility) else {
+            visibilityObjects.removeValue(forKey: id)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
                 code: 2,
@@ -117,6 +123,7 @@ class ViewAnnotationController {
         let sizingResult = sizeView(view, id: id)
         switch sizingResult {
         case .failure:
+            visibilityObjects.removeValue(forKey: id)
             return sizingResult
         case .success:
             break
@@ -131,6 +138,11 @@ class ViewAnnotationController {
         // Configure anchor
         annotation.variableAnchors = [ViewAnnotationAnchorConfig(anchor: parseAnchor(anchor))]
         annotation.allowOverlap = allowOverlap
+
+        // Hook into visibility changes for animations
+        annotation.onVisibilityChanged = { [weak self] isVisible in
+            self?.visibilityObjects[id]?.isVisible = isVisible
+        }
 
         // Add tap gesture recognizer
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
@@ -375,6 +387,7 @@ class ViewAnnotationController {
             layoutNames.removeValue(forKey: id)
             annotationOptions.removeValue(forKey: id)
             annotationData.removeValue(forKey: id)
+            visibilityObjects.removeValue(forKey: id)
             return .success(())
         }
 
@@ -391,6 +404,7 @@ class ViewAnnotationController {
         layoutNames.removeValue(forKey: id)
         annotationOptions.removeValue(forKey: id)
         annotationData.removeValue(forKey: id)
+        visibilityObjects.removeValue(forKey: id)
         return .success(())
     }
 
@@ -409,6 +423,7 @@ class ViewAnnotationController {
         layoutNames.removeAll()
         annotationOptions.removeAll()
         annotationData.removeAll()
+        visibilityObjects.removeAll()
     }
     
     private func parseAnchor(_ anchor: String?) -> MapboxMaps.ViewAnnotationAnchor {
