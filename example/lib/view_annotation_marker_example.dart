@@ -89,17 +89,9 @@ class ViewAnnotationMarkerExampleState
 
     // Set up tap listener for view annotations
     mapboxMap.setOnViewAnnotationTapListener(
-        (FeaturesetFeature? feature, Map<String, dynamic> data) {
-      if (feature != null) {
-        final viewLayerId = feature.featureset.layerId;
-        final featureId = feature.id?.id;
-
-        // Construct annotation ID: ${viewLayerId}_default_${featureId}
-        if (viewLayerId != null && featureId != null) {
-          final annotationId = '${viewLayerId}_default_$featureId';
-          _toggleSelection(annotationId);
-        }
-      }
+        (String annotationId, FeaturesetFeature? feature, Map<String, dynamic> data) {
+      // Use the annotationId directly - no need to reconstruct it
+      _toggleSelection(annotationId);
     });
   }
 

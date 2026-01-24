@@ -492,6 +492,7 @@ class ViewAnnotationController {
         }
 
         tapEventChannel.invokeMethod("onTap", arguments: [
+            "annotationId": annotationId,
             "feature": featureList,
             "data": data
         ])

@@ -136,6 +136,7 @@ class ViewAnnotationController(
             val tapData = annotationData[id] ?: emptyMap()
             val feature = annotationFeatures[id]
             tapEventChannel.invokeMethod("onTap", mapOf(
+                "annotationId" to id,
                 "feature" to serializeFeature(feature),
                 "data" to tapData
             ))
@@ -250,6 +251,7 @@ class ViewAnnotationController(
             val tapData = annotationData[id] ?: emptyMap()
             val storedFeature = annotationFeatures[id]
             tapEventChannel.invokeMethod("onTap", mapOf(
+                "annotationId" to id,
                 "feature" to serializeFeature(storedFeature),
                 "data" to tapData
             ))

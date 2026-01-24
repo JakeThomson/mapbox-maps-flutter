@@ -13,7 +13,7 @@ class _MapboxMapsPlatform {
       binaryMessenger);
   final BinaryMessenger binaryMessenger;
   final int channelSuffix;
-  Function(FeaturesetFeature?, Map<String, dynamic>)? onViewAnnotationTap;
+  Function(String, FeaturesetFeature?, Map<String, dynamic>)? onViewAnnotationTap;
 
   _MapboxMapsPlatform(
       {required this.binaryMessenger, required this.channelSuffix}) {
@@ -34,6 +34,7 @@ class _MapboxMapsPlatform {
   Future<dynamic> _handleViewAnnotationTap(MethodCall call) async {
     if (call.method == "onTap" && call.arguments is Map) {
       final args = call.arguments as Map;
+      final annotationId = args['annotationId'] as String;
       final featureList = args['feature'] as List<Object?>?;
       final data = args['data'] as Map<dynamic, dynamic>?;
       if (onViewAnnotationTap != null) {
@@ -41,7 +42,7 @@ class _MapboxMapsPlatform {
         final feature = _decodeFeaturesetFeature(featureList);
         // Convert Map<dynamic, dynamic> to Map<String, dynamic>
         final dataMap = data?.map((key, value) => MapEntry(key.toString(), value)) ?? <String, dynamic>{};
-        onViewAnnotationTap!(feature, dataMap);
+        onViewAnnotationTap!(annotationId, feature, dataMap);
       }
     }
   }
