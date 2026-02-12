@@ -35,6 +35,9 @@ class ViewLayerController {
     private var updatePending = false
     private let debounceDelay: TimeInterval = 0.15
     private var cameraObserver: Cancelable?
+    private var sourceDataObserver: Cancelable?
+    private var mapIdleObserver: Cancelable?
+    private var lastUpdateTrigger: String = "initial"
 
     init(mapView: MapView, viewAnnotationController: ViewAnnotationController, messenger: FlutterBinaryMessenger, channelSuffix: String) {
         self.mapView = mapView
@@ -44,6 +47,8 @@ class ViewLayerController {
 
         setupMethodChannels()
         setupCameraObserver()
+        setupSourceDataObserver()
+        setupMapIdleObserver()
     }
 
     private func setupMethodChannels() {
@@ -110,7 +115,39 @@ class ViewLayerController {
 
     private func setupCameraObserver() {
         cameraObserver = mapView.mapboxMap.onCameraChanged.observe { [weak self] _ in
+            self?.lastUpdateTrigger = "cameraChanged"
             self?.scheduleUpdate()
+        }
+    }
+
+    private func setupSourceDataObserver() {
+        sourceDataObserver = mapView.mapboxMap.onSourceDataLoaded.observe { [weak self] event in
+            guard let self = self else { return }
+            let sourceId = event.sourceId
+            let hasAffectedLayers = self.viewLayers.values.contains { $0.sourceId == sourceId }
+            if hasAffectedLayers {
+                let isCluster = self.viewLayers.values.contains { $0.sourceId == sourceId && $0.id.contains("cluster") }
+                if isCluster {
+                    NSLog("[ViewLayer] sourceDataLoaded: source=%@, type=%@ — scheduling update", sourceId, String(describing: event.type))
+                }
+                self.lastUpdateTrigger = "sourceDataLoaded"
+                // Use a longer delay to allow the rendering pipeline to process clusters
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    self?.updateVisibleFeatures()
+                }
+            }
+        }
+    }
+
+    private func setupMapIdleObserver() {
+        mapIdleObserver = mapView.mapboxMap.onMapIdle.observe { [weak self] _ in
+            guard let self = self else { return }
+            let hasClusterLayers = self.viewLayers.values.contains { $0.id.contains("cluster") }
+            if hasClusterLayers {
+                NSLog("[ViewLayer] mapIdle — scheduling update")
+                self.lastUpdateTrigger = "mapIdle"
+                self.updateVisibleFeatures()
+            }
         }
     }
 
@@ -165,12 +202,22 @@ class ViewLayerController {
         let currentZoom = mapView.mapboxMap.cameraState.zoom
 
         for config in viewLayers.values {
+            let isCluster = config.id.contains("cluster")
+
             // Check zoom level
             if let minZoom = config.minZoom, currentZoom < minZoom {
+                let count = featureAnnotations[config.id]?.count ?? 0
+                if count > 0 && isCluster {
+                    NSLog("[ViewLayer] %@: removing %d annotations — zoom %.2f < minZoom %.2f", config.id, count, currentZoom, minZoom)
+                }
                 removeAllAnnotations(forLayer: config.id)
                 continue
             }
             if let maxZoom = config.maxZoom, currentZoom >= maxZoom {
+                let count = featureAnnotations[config.id]?.count ?? 0
+                if count > 0 && isCluster {
+                    NSLog("[ViewLayer] %@: removing %d annotations — zoom %.2f >= maxZoom %.2f", config.id, count, currentZoom, maxZoom)
+                }
                 removeAllAnnotations(forLayer: config.id)
                 continue
             }
@@ -210,6 +257,11 @@ class ViewLayerController {
 
             switch result {
             case .success(let queriedFeatures):
+                let isCluster = config.id.contains("cluster")
+                if isCluster {
+                    NSLog("[ViewLayer] %@: queried %d features from %@ (zoom=%.2f, trigger=%@)", config.id, queriedFeatures.count, config.associatedSymbolLayerId ?? "nil", self.mapView.mapboxMap.cameraState.zoom, self.lastUpdateTrigger)
+                }
+
                 var currentFeatureIds = Set<String>()
                 let previousFeatureIds = self.visibleFeatureIds[config.id] ?? []
 
@@ -217,7 +269,12 @@ class ViewLayerController {
 
                 for queriedFeature in queriedFeatures {
                     // Filter by source and sourceLayer
-                    guard queriedFeature.queriedFeature.source == config.sourceId else { continue }
+                    guard queriedFeature.queriedFeature.source == config.sourceId else {
+                        if isCluster {
+                            NSLog("[ViewLayer] %@: skipping feature — source mismatch: %@ != %@", config.id, queriedFeature.queriedFeature.source, config.sourceId)
+                        }
+                        continue
+                    }
                     if let sourceLayer = config.sourceLayer {
                         guard queriedFeature.queriedFeature.sourceLayer == sourceLayer else { continue }
                     }
@@ -230,6 +287,9 @@ class ViewLayerController {
                         sourceLayer: config.sourceLayer,
                         requireExplicit: useLayerFeatureBinding
                     ) else {
+                        if isCluster {
+                            NSLog("[ViewLayer] %@: getFeatureId returned nil (requireExplicit=%d, identifier=%@)", config.id, useLayerFeatureBinding ? 1 : 0, String(describing: feature.identifier))
+                        }
                         continue
                     }
 
@@ -241,20 +301,29 @@ class ViewLayerController {
                         let rawFeatureId: String? = useLayerFeatureBinding ?
                             self.getFeatureId(feature: feature, sourceLayer: config.sourceLayer, requireExplicit: true, rawId: true) : nil
 
+                        if isCluster {
+                            NSLog("[ViewLayer] %@: NEW feature — featureId=%@, rawFeatureId=%@", config.id, featureId, rawFeatureId ?? "nil")
+                        }
+
                         self.createAnnotation(for: config, feature: feature, featureId: featureId, rawFeatureId: rawFeatureId)
                     }
                 }
 
                 // Remove annotations for features no longer visible
                 let removedFeatures = previousFeatureIds.subtracting(currentFeatureIds)
+                if !removedFeatures.isEmpty && isCluster {
+                    NSLog("[ViewLayer] %@: removing %d annotations (had %d, now %d)", config.id, removedFeatures.count, previousFeatureIds.count, currentFeatureIds.count)
+                }
                 for featureId in removedFeatures {
                     self.removeAnnotation(forLayer: config.id, featureId: featureId)
                 }
 
                 self.visibleFeatureIds[config.id] = currentFeatureIds
 
-            case .failure:
-                break
+            case .failure(let error):
+                if config.id.contains("cluster") {
+                    NSLog("[ViewLayer] %@: queryRenderedFeatures FAILED: %@", config.id, error.localizedDescription)
+                }
             }
         }
     }
@@ -316,6 +385,9 @@ class ViewLayerController {
     ///   - rawFeatureId: The raw feature ID for layer feature binding (e.g., "123"). Only needed when using associatedSymbolLayerId.
     private func createAnnotation(for config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = nil) {
         guard case .point(let point) = feature.geometry else {
+            if config.id.contains("cluster") {
+                NSLog("[ViewLayer] %@: createAnnotation skipped — geometry is not a Point", config.id)
+            }
             return
         }
 
@@ -352,6 +424,10 @@ class ViewLayerController {
 
         let annotationId = "\(config.id)_\(featureId)"
 
+        if config.id.contains("cluster") {
+            NSLog("[ViewLayer] Creating annotation: %@, layoutName: %@, rawFeatureId: %@, data: %@", annotationId, config.layoutName, rawFeatureId ?? "nil", String(describing: viewData))
+        }
+
         let result: Result<Void, Error>
 
         // Use layer feature binding if associatedSymbolLayerId is set
@@ -382,12 +458,17 @@ class ViewLayerController {
 
         switch result {
         case .success:
+            if config.id.contains("cluster") {
+                NSLog("[ViewLayer] %@: annotation CREATED: %@", config.id, annotationId)
+            }
             if featureAnnotations[config.id] == nil {
                 featureAnnotations[config.id] = []
             }
             featureAnnotations[config.id]?.insert(annotationId)
-        case .failure:
-            break
+        case .failure(let error):
+            if config.id.contains("cluster") {
+                NSLog("[ViewLayer] %@: annotation FAILED: %@, error: %@", config.id, annotationId, error.localizedDescription)
+            }
         }
     }
 
@@ -410,6 +491,8 @@ class ViewLayerController {
 
     func dispose() {
         cameraObserver?.cancel()
+        sourceDataObserver?.cancel()
+        mapIdleObserver?.cancel()
 
         for layerId in viewLayers.keys {
             removeAllAnnotations(forLayer: layerId)

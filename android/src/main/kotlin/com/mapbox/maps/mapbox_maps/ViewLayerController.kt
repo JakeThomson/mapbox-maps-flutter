@@ -2,13 +2,16 @@ package com.mapbox.maps.mapbox_maps
 
 import android.os.Handler
 import android.os.Looper
+import com.mapbox.common.Cancelable
 import com.mapbox.geojson.Feature
 import com.mapbox.geojson.Point
 import com.mapbox.maps.CameraChangedCallback
+import com.mapbox.maps.MapIdleCallback
 import com.mapbox.maps.MapView
 import com.mapbox.maps.MapboxMap
 import com.mapbox.maps.RenderedQueryGeometry
-import com.mapbox.maps.RenderedQueryOptions
+import com.mapbox.maps.SourceDataLoadedCallback
+import com.mapbox.maps.mapbox_maps.pigeons.RenderedQueryOptions
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.common.BasicMessageChannel
@@ -52,20 +55,37 @@ class ViewLayerController(
     private var updatePending = false
     private val visibleFeatureIds = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of feature IDs
 
-    private val cameraListener = CameraChangedCallback {
-        scheduleUpdate()
-    }
+    private var cameraChangedCancelable: Cancelable? = null
+    private var sourceDataCancelable: Cancelable? = null
+    private var mapIdleCancelable: Cancelable? = null
 
     init {
         setupMethodChannel()
-        mapboxMap.subscribeCameraChanged(cameraListener)
+        cameraChangedCancelable = mapboxMap.subscribeCameraChanged(CameraChangedCallback {
+            scheduleUpdate()
+        })
+        sourceDataCancelable = mapboxMap.subscribeSourceDataLoaded(SourceDataLoadedCallback { event ->
+            val sourceId = event.sourceId
+            val hasAffectedLayers = viewLayers.values.any { it.sourceId == sourceId }
+            if (hasAffectedLayers) {
+                mainHandler.postDelayed({
+                    updateVisibleFeatures()
+                }, 400L)
+            }
+        })
+        mapIdleCancelable = mapboxMap.subscribeMapIdle(MapIdleCallback {
+            val hasClusterLayers = viewLayers.values.any { it.id.contains("cluster") }
+            if (hasClusterLayers) {
+                updateVisibleFeatures()
+            }
+        })
     }
 
     private fun setupMethodChannel() {
         val addChannel = BasicMessageChannel<Any?>(
+            messenger,
             "dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.addViewLayer.$channelSuffix",
-            StandardMessageCodec(),
-            messenger
+            StandardMessageCodec()
         )
 
         addChannel.setMessageHandler { message, reply ->
@@ -90,9 +110,9 @@ class ViewLayerController(
         }
 
         val updateChannel = BasicMessageChannel<Any?>(
+            messenger,
             "dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.updateViewLayer.$channelSuffix",
-            StandardMessageCodec(),
-            messenger
+            StandardMessageCodec()
         )
 
         updateChannel.setMessageHandler { message, reply ->
@@ -202,12 +222,16 @@ class ViewLayerController(
 
     private fun queryFeaturesForLayer(config: ViewLayerConfig) {
         try {
-            // Query rendered features - use null layerIds to query all layers,
-            // then filter by source and sourceLayer below
-            val options = RenderedQueryOptions(
+            // Convert filter list to JSON string for pigeon RenderedQueryOptions
+            val filterString: String? = config.filter?.let {
+                JSONArray(it).toString()
+            }
+
+            val pigeonOptions = RenderedQueryOptions(
                 config.associatedSymbolLayerId?.let { listOf(it) },
-                config.filter
+                filterString
             )
+            val options = pigeonOptions.toRenderedQueryOptions()
 
             // Query entire viewport using screen bounds
             val screenBox = com.mapbox.maps.ScreenBox(
@@ -218,25 +242,34 @@ class ViewLayerController(
                 )
             )
 
-            mapboxMap.queryRenderedFeatures(screenBox, options) { expected ->
-                expected.value?.let { queriedFeatures ->
+            mapboxMap.queryRenderedFeatures(
+                RenderedQueryGeometry.valueOf(screenBox),
+                options
+            ) { expected ->
+                if (expected.isError) {
+                    return@queryRenderedFeatures
+                }
+
+                expected.value?.let { queriedRenderedFeatures ->
                     val currentFeatureIds = mutableSetOf<String>()
                     val previousFeatureIds = visibleFeatureIds[config.id] ?: mutableSetOf()
                     val useLayerFeatureBinding = config.associatedSymbolLayerId != null
 
-                    queriedFeatures.forEach { queriedFeature ->
+                    queriedRenderedFeatures.forEach { queriedRendered ->
+                        val queriedFeature = queriedRendered.queriedFeature
+
                         // Filter by source
-                        if (queriedFeature.queriedFeature.source != config.sourceId) {
+                        if (queriedFeature.source != config.sourceId) {
                             return@forEach
                         }
 
                         // Filter by sourceLayer if specified
                         if (config.sourceLayer != null &&
-                            queriedFeature.queriedFeature.sourceLayer != config.sourceLayer) {
+                            queriedFeature.sourceLayer != config.sourceLayer) {
                             return@forEach
                         }
 
-                        val feature = queriedFeature.queriedFeature.feature
+                        val feature = queriedFeature.feature
 
                         // Get the namespaced feature ID for tracking
                         val featureId = getFeatureId(
@@ -270,8 +303,6 @@ class ViewLayerController(
 
                     visibleFeatureIds[config.id] = currentFeatureIds
                 }
-
-                // Errors are silently ignored
             }
         } catch (e: Exception) {
             // Errors are silently ignored
@@ -384,7 +415,9 @@ class ViewLayerController(
     }
 
     fun dispose() {
-        mapboxMap.unsubscribeCameraChanged(cameraListener)
+        cameraChangedCancelable?.cancel()
+        sourceDataCancelable?.cancel()
+        mapIdleCancelable?.cancel()
         viewLayers.keys.forEach { layerId ->
             removeAllAnnotationsForLayer(layerId)
         }

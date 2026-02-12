@@ -236,7 +236,7 @@ class ViewAnnotationController(
                 id = FeaturesetFeatureId(featureId, null),
                 featureset = FeaturesetDescriptor(null, null, viewLayerId),
                 geometry = it.geometry()?.toMap() ?: emptyMap(),
-                properties = it.properties()?.toFilteredMap() ?: emptyMap(),
+                properties = it.properties()?.let { props -> org.json.JSONObject(props.toString()).toFilteredMap() } ?: emptyMap(),
                 state = emptyMap()
             )
         }
