@@ -80,6 +80,8 @@ class ViewLayer extends Layer {
     ViewAnnotationAnchor? this.anchor,
     bool? this.allowOverlap,
     String? this.associatedSymbolLayerId,
+    int? this.maxVisibleAnnotations,
+    List<String>? this.imageCacheKeys,
   }) : super(
             id: id,
             visibility: visibility,
@@ -157,6 +159,26 @@ class ViewLayer extends Layer {
   /// ```
   String? associatedSymbolLayerId;
 
+  /// Maximum number of view annotations to display at once.
+  ///
+  /// When set, only the first N features from the query result are rendered
+  /// as view annotations. This limits the compositing load on the GPU and
+  /// prevents idle-rendering jank when hundreds of native views are on screen.
+  ///
+  /// Set to `null` (default) for unlimited annotations.
+  int? maxVisibleAnnotations;
+
+  /// Optional list of data keys used to compute an image cache key.
+  ///
+  /// When set, annotation views are rendered to static images (UIImageView on iOS,
+  /// ImageView on Android) instead of live view hierarchies. The cache key is
+  /// computed from `layoutName` + the values of the specified data keys.
+  /// Annotations with the same cache key share a single rendered image,
+  /// drastically reducing compositor overhead.
+  ///
+  /// When null (default), annotations use live views as before.
+  List<String>? imageCacheKeys;
+
   @override
   Future<String> _encode() async {
     var layout = {};
@@ -222,6 +244,12 @@ class ViewLayer extends Layer {
     if (associatedSymbolLayerId != null) {
       properties["associatedSymbolLayerId"] = associatedSymbolLayerId!;
     }
+    if (maxVisibleAnnotations != null) {
+      properties["maxVisibleAnnotations"] = maxVisibleAnnotations!;
+    }
+    if (imageCacheKeys != null) {
+      properties["imageCacheKeys"] = imageCacheKeys!;
+    }
 
     return json.encode(properties);
   }
@@ -270,6 +298,8 @@ class ViewLayer extends Layer {
               (e) => e.name == map["anchor"]),
       allowOverlap: map["allowOverlap"],
       associatedSymbolLayerId: map["associatedSymbolLayerId"] as String?,
+      maxVisibleAnnotations: map["maxVisibleAnnotations"] as int?,
+      imageCacheKeys: (map["imageCacheKeys"] as List?)?.cast<String>(),
     );
   }
 }

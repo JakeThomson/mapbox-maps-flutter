@@ -200,7 +200,7 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
             let data = args["data"] as? [String: Any]
             let anchor = args["anchor"] as? String
             let allowOverlap = args["allowOverlap"] as? Bool ?? true
-            
+
             switch viewAnnotationController.add(
                 id: id,
                 layoutName: layoutName,

@@ -1,7 +1,10 @@
 package com.mapbox.maps.mapbox_maps
 
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import com.mapbox.common.Cancelable
 import com.mapbox.geojson.Feature
 import com.mapbox.geojson.Point
@@ -29,7 +32,9 @@ data class ViewLayerConfig(
     val filter: List<Any>?,
     val minZoom: Double?,
     val maxZoom: Double?,
-    val associatedSymbolLayerId: String?
+    val associatedSymbolLayerId: String?,
+    val maxVisibleAnnotations: Int?,
+    val imageCacheKeys: List<String>?
 )
 
 data class PropertyMappingConfig(
@@ -47,6 +52,7 @@ class ViewLayerController(
 ) {
     companion object {
         private const val DEBOUNCE_DELAY_MS = 150L
+        private const val TAG = "ViewLayerPerf"
     }
 
     private val viewLayers = mutableMapOf<String, ViewLayerConfig>()
@@ -54,6 +60,31 @@ class ViewLayerController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var updatePending = false
     private val visibleFeatureIds = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of feature IDs
+
+    // Time-based grace period
+    private val hiddenTimestamps = mutableMapOf<String, MutableMap<String, Long>>() // layerId -> featureId -> hide time (elapsedRealtime)
+    private val hiddenAnnotations = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of featureIds currently hidden
+    private val maxHiddenPerLayer = 200
+    private val graceDurationMs = 5000L
+
+    // Staggered batch creation
+    private data class PendingCreate(
+        val config: ViewLayerConfig,
+        val feature: Feature,
+        val featureId: String,
+        val rawFeatureId: String?
+    )
+    private val pendingCreations = mutableListOf<PendingCreate>()
+    private val maxCreatesPerFrame = 15
+    private var isDrainingCreationQueue = false
+
+    // Churn detection
+    private val recentlyRemoved = mutableMapOf<String, MutableMap<String, Long>>() // layerId -> featureId -> remove time
+    private var periodChurnCount = 0
+
+    // Image mode: style image tracking
+    private val registeredStyleImages = mutableMapOf<String, MutableSet<String>>()  // layerId -> set of registered style image IDs
+    private val imageModeExpressionSet = mutableSetOf<String>()  // layers where iconImage expression has been set
 
     private var cameraChangedCancelable: Cancelable? = null
     private var sourceDataCancelable: Cancelable? = null
@@ -68,6 +99,7 @@ class ViewLayerController(
             val sourceId = event.sourceId
             val hasAffectedLayers = viewLayers.values.any { it.sourceId == sourceId }
             if (hasAffectedLayers) {
+                Log.d(TAG, "ViewLayerController: sourceDataLoaded | source=$sourceId, type=${event.type}, scheduling delayed update (400ms)")
                 mainHandler.postDelayed({
                     updateVisibleFeatures()
                 }, 400L)
@@ -98,6 +130,18 @@ class ViewLayerController(
                 viewLayers[config.id] = config
                 featureAnnotations[config.id] = mutableSetOf()
                 visibleFeatureIds[config.id] = mutableSetOf()
+
+                // Register image-mode layer for tap fallback
+                if (config.imageCacheKeys != null && config.associatedSymbolLayerId != null) {
+                    viewAnnotationController.registerImageModeLayer(ImageModeLayerConfig(
+                        symbolLayerId = config.associatedSymbolLayerId,
+                        viewLayerId = config.id,
+                        sourceId = config.sourceId,
+                        sourceLayer = config.sourceLayer,
+                        propertyMapping = config.propertyMapping
+                    ))
+                }
+
                 scheduleUpdate()
 
                 reply.reply(emptyMap<String, Any>())
@@ -165,7 +209,11 @@ class ViewLayerController(
             filter = parseFilter(obj.optJSONArray("filter")),
             minZoom = if (obj.has("minzoom")) obj.getDouble("minzoom") else null,
             maxZoom = if (obj.has("maxzoom")) obj.getDouble("maxzoom") else null,
-            associatedSymbolLayerId = obj.optString("associatedSymbolLayerId", null).takeIf { it.isNotEmpty() }
+            associatedSymbolLayerId = obj.optString("associatedSymbolLayerId", null).takeIf { it.isNotEmpty() },
+            maxVisibleAnnotations = if (obj.has("maxVisibleAnnotations")) obj.getInt("maxVisibleAnnotations") else null,
+            imageCacheKeys = obj.optJSONArray("imageCacheKeys")?.let { arr ->
+                (0 until arr.length()).map { arr.getString(it) }
+            }
         )
     }
 
@@ -190,8 +238,12 @@ class ViewLayerController(
     }
 
     private fun scheduleUpdate() {
-        if (updatePending) return
+        if (updatePending) {
+            Log.d(TAG, "ViewLayerController: scheduleUpdate SKIPPED | already pending")
+            return
+        }
 
+        Log.d(TAG, "ViewLayerController: scheduleUpdate SCHEDULED | delay=${DEBOUNCE_DELAY_MS}ms")
         updatePending = true
         mainHandler.postDelayed({
             updatePending = false
@@ -201,6 +253,7 @@ class ViewLayerController(
 
     private fun updateVisibleFeatures() {
         val currentZoom = mapboxMap.cameraState.zoom
+        Log.d(TAG, "ViewLayerController: updateVisibleFeatures START | zoom=%.2f, layers=${viewLayers.size}".format(currentZoom))
 
         viewLayers.values.forEach { config ->
             // Check zoom level
@@ -213,15 +266,15 @@ class ViewLayerController(
                 return@forEach
             }
 
-            // Query rendered features for this layer
-            // We need to query a source, but ViewLayers don't exist as actual layers in the map
-            // So we query features from the source directly
             queryFeaturesForLayer(config)
         }
     }
 
     private fun queryFeaturesForLayer(config: ViewLayerConfig) {
         try {
+            val queryStartTime = SystemClock.elapsedRealtime()
+            Log.d(TAG, "ViewLayerController: queryFeatures START | layer=${config.id}")
+
             // Convert filter list to JSON string for pigeon RenderedQueryOptions
             val filterString: String? = config.filter?.let {
                 JSONArray(it).toString()
@@ -246,68 +299,298 @@ class ViewLayerController(
                 RenderedQueryGeometry.valueOf(screenBox),
                 options
             ) { expected ->
+                val queryDuration = SystemClock.elapsedRealtime() - queryStartTime
+
                 if (expected.isError) {
+                    Log.w(TAG, "ViewLayerController: queryFeatures ERROR | layer=${config.id}, duration=${queryDuration}ms, error=${expected.error}")
                     return@queryRenderedFeatures
                 }
 
                 expected.value?.let { queriedRenderedFeatures ->
+                    // --- Image mode short-circuit: render to style images, skip ViewAnnotations ---
+                    if (config.imageCacheKeys != null) {
+                        handleImageModeFeatures(config, queriedRenderedFeatures)
+                        return@let
+                    }
+
+                    val now = SystemClock.elapsedRealtime()
                     val currentFeatureIds = mutableSetOf<String>()
                     val previousFeatureIds = visibleFeatureIds[config.id] ?: mutableSetOf()
+                    val currentHidden = hiddenAnnotations[config.id] ?: mutableSetOf()
                     val useLayerFeatureBinding = config.associatedSymbolLayerId != null
+                    var queuedCount = 0
+                    var unhiddenCount = 0
+
+                    // Collect all valid feature IDs + features from the query
+                    val queriedFeatureMap = mutableListOf<Pair<String, Feature>>()
 
                     queriedRenderedFeatures.forEach { queriedRendered ->
                         val queriedFeature = queriedRendered.queriedFeature
 
-                        // Filter by source
                         if (queriedFeature.source != config.sourceId) {
                             return@forEach
                         }
 
-                        // Filter by sourceLayer if specified
                         if (config.sourceLayer != null &&
                             queriedFeature.sourceLayer != config.sourceLayer) {
                             return@forEach
                         }
 
                         val feature = queriedFeature.feature
-
-                        // Get the namespaced feature ID for tracking
                         val featureId = getFeatureId(
                             feature,
                             config.sourceLayer,
                             requireExplicit = useLayerFeatureBinding
-                        )
+                        ) ?: return@forEach
 
-                        if (featureId == null) {
-                            return@forEach
-                        }
+                        queriedFeatureMap.add(featureId to feature)
+                    }
 
+                    // Cap max visible annotations — truncate to first N from query (render/z-order)
+                    val cappedFeatures = if (config.maxVisibleAnnotations != null && queriedFeatureMap.size > config.maxVisibleAnnotations) {
+                        queriedFeatureMap.take(config.maxVisibleAnnotations)
+                    } else {
+                        queriedFeatureMap
+                    }
+
+                    for ((featureId, feature) in cappedFeatures) {
                         currentFeatureIds.add(featureId)
 
-                        // If this is a new feature, create annotation
+                        // Feature reappeared from hidden state — unhide and clear timestamp
+                        if (currentHidden.contains(featureId)) {
+                            val annotationId = "${config.id}_$featureId"
+                            viewAnnotationController.setVisible(annotationId, true)
+                            hiddenAnnotations[config.id]?.remove(featureId)
+                            hiddenTimestamps[config.id]?.remove(featureId)
+                            unhiddenCount++
+                            continue
+                        }
+
                         if (!previousFeatureIds.contains(featureId)) {
-                            // Get raw feature ID for layer feature binding
+                            queuedCount++
                             val rawFeatureId: String? = if (useLayerFeatureBinding) {
                                 getFeatureId(feature, config.sourceLayer, requireExplicit = true, rawId = true)
                             } else null
 
-                            createAnnotationForFeature(config, feature, featureId, rawFeatureId)
+                            // Staggered creation — enqueue instead of creating inline
+                            pendingCreations.add(PendingCreate(config, feature, featureId, rawFeatureId))
                         }
                     }
 
-                    // Remove annotations for features no longer visible
+                    // Process removals with time-based grace period
                     val removedFeatures = previousFeatureIds - currentFeatureIds
+                    var hiddenCount = 0
+                    var actualRemovedCount = 0
+
                     removedFeatures.forEach { featureId ->
-                        removeAnnotationForFeature(config.id, featureId)
+                        if (currentHidden.contains(featureId)) {
+                            // Already hidden — check if grace period expired
+                            val hideTime = hiddenTimestamps[config.id]?.get(featureId)
+                            if (hideTime != null && now - hideTime >= graceDurationMs) {
+                                // Grace period expired — actually remove
+                                removeAnnotationForFeature(config.id, featureId)
+                                hiddenAnnotations[config.id]?.remove(featureId)
+                                hiddenTimestamps[config.id]?.remove(featureId)
+                                actualRemovedCount++
+                            }
+                            // Otherwise keep hidden, still within grace period
+                            return@forEach
+                        }
+
+                        // First time absent — immediately hide and record timestamp
+                        val annotationId = "${config.id}_$featureId"
+                        viewAnnotationController.setVisible(annotationId, false)
+                        hiddenAnnotations.getOrPut(config.id) { mutableSetOf() }.add(featureId)
+                        hiddenTimestamps.getOrPut(config.id) { mutableMapOf() }[featureId] = now
+                        hiddenCount++
                     }
 
-                    visibleFeatureIds[config.id] = currentFeatureIds
+                    // Enforce max hidden per layer — remove oldest hidden if over limit
+                    val timestamps = hiddenTimestamps[config.id]
+                    if (timestamps != null && timestamps.size > maxHiddenPerLayer) {
+                        val sorted = timestamps.entries.sortedBy { it.value }
+                        val excess = sorted.size - maxHiddenPerLayer
+                        for (i in 0 until excess) {
+                            val featureId = sorted[i].key
+                            removeAnnotationForFeature(config.id, featureId)
+                            hiddenAnnotations[config.id]?.remove(featureId)
+                            hiddenTimestamps[config.id]?.remove(featureId)
+                            actualRemovedCount++
+                        }
+                    }
+
+                    // Keep hidden features in visibleFeatureIds so they aren't re-created
+                    val hiddenFeatureIds = hiddenAnnotations[config.id] ?: mutableSetOf()
+                    val combined = mutableSetOf<String>()
+                    combined.addAll(currentFeatureIds)
+                    combined.addAll(hiddenFeatureIds)
+
+                    // Also add pending creation featureIds to prevent duplicate creation
+                    pendingCreations.filter { it.config.id == config.id }.forEach { combined.add(it.featureId) }
+
+                    visibleFeatureIds[config.id] = combined
+
+                    if (unhiddenCount > 0) {
+                        Log.d(TAG, "VISIBILITY_RESTORE layer=${config.id} restored=$unhiddenCount")
+                    }
+                    if (hiddenCount > 0) {
+                        Log.d(TAG, "GRACE_HIDE layer=${config.id} hidden=$hiddenCount")
+                    }
+
+                    Log.d(TAG, "BATCH layer=${config.id} queryMs=${queryDuration} queued=$queuedCount hidden=$hiddenCount restored=$unhiddenCount removed=$actualRemovedCount total=${featureAnnotations[config.id]?.size ?: 0}")
+
+                    // Start draining the creation queue
+                    drainCreationQueue()
                 }
             }
         } catch (e: Exception) {
-            // Errors are silently ignored
+            Log.w(TAG, "ViewLayerController: queryFeatures EXCEPTION | layer=${config.id}, error=${e.message}")
         }
     }
+
+    // region Image mode (style image rendering)
+
+    private fun handleImageModeFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
+        val cacheKeys = config.imageCacheKeys ?: return
+        val symbolLayerId = config.associatedSymbolLayerId ?: return
+
+        val batchStart = SystemClock.elapsedRealtime()
+
+        val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
+        val featuresToRender = mutableListOf<Pair<String, Map<String, Any?>>>()
+
+        for (queriedRendered in queriedRenderedFeatures) {
+            val queriedFeature = queriedRendered.queriedFeature
+            if (queriedFeature.source != config.sourceId) continue
+            if (config.sourceLayer != null && queriedFeature.sourceLayer != config.sourceLayer) continue
+
+            val feature = queriedFeature.feature
+
+            // Build data from property mapping
+            val viewData = mutableMapOf<String, Any?>()
+            config.propertyMapping.forEach { (dataKey, mapping) ->
+                when (mapping.type) {
+                    "feature" -> {
+                        mapping.propertyKey?.let { propKey ->
+                            val value = feature.getProperty(propKey)
+                            viewData[dataKey] = value?.asString ?: value?.asJsonPrimitive
+                        }
+                    }
+                    "constant" -> viewData[dataKey] = mapping.value
+                }
+            }
+
+            val cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, cacheKeys)
+            if (existingImages.contains(cacheKey)) continue
+            if (featuresToRender.any { it.first == cacheKey }) continue
+
+            featuresToRender.add(cacheKey to viewData)
+        }
+
+        // Render new variations asynchronously
+        var completedCount = 0
+        val totalToRender = featuresToRender.size
+
+        if (totalToRender == 0) {
+            // No new images needed, just ensure expression is set
+            setIconImageExpression(config, symbolLayerId, cacheKeys)
+            val batchMs = SystemClock.elapsedRealtime() - batchStart
+            Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=0 totalImages=${existingImages.size}")
+            return
+        }
+
+        for ((cacheKey, viewData) in featuresToRender) {
+            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, cacheKeys) { bitmap ->
+                if (bitmap != null) {
+                    // Convert Bitmap to Mapbox style image
+                    val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    val byteBuffer = java.nio.ByteBuffer.allocateDirect(bitmapCopy.byteCount)
+                    bitmapCopy.copyPixelsToBuffer(byteBuffer)
+
+                    val scale = context.resources.displayMetrics.density
+                    val expected = mapboxMap.getStyle()?.addStyleImage(
+                        cacheKey,
+                        scale,
+                        com.mapbox.maps.Image(bitmapCopy.width, bitmapCopy.height, com.mapbox.bindgen.DataRef(byteBuffer)),
+                        false,
+                        emptyList(),
+                        emptyList(),
+                        null
+                    )
+
+                    if (expected?.isError == true) {
+                        Log.w(TAG, "STYLE_IMAGE_REGISTER_FAIL cacheKey=$cacheKey error=${expected.error}")
+                    } else {
+                        existingImages.add(cacheKey)
+                        Log.d(TAG, "STYLE_IMAGE_REGISTERED cacheKey=$cacheKey size=${bitmapCopy.width}x${bitmapCopy.height}")
+                    }
+                }
+
+                completedCount++
+                if (completedCount == totalToRender) {
+                    setIconImageExpression(config, symbolLayerId, cacheKeys)
+                    val batchMs = SystemClock.elapsedRealtime() - batchStart
+                    Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=$totalToRender totalImages=${existingImages.size}")
+                }
+            }
+        }
+    }
+
+    private fun setIconImageExpression(config: ViewLayerConfig, symbolLayerId: String, cacheKeys: List<String>) {
+        if (imageModeExpressionSet.contains(config.id)) return
+
+        // Build expression JSON: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
+        val parts = mutableListOf<Any>()
+        parts.add("concat")
+        parts.add("${config.layoutName}_")
+        for ((i, key) in cacheKeys.withIndex()) {
+            if (i > 0) {
+                parts.add("_")
+            }
+            parts.add(listOf("get", key))
+        }
+
+        val expressionJson = org.json.JSONArray(parts).toString()
+        val expressionValue = com.mapbox.bindgen.Value.fromJson(expressionJson)
+
+        if (expressionValue.isError) {
+            Log.w(TAG, "ICON_IMAGE_EXPRESSION_PARSE_FAIL layer=${config.id} error=${expressionValue.error}")
+            return
+        }
+
+        val result = mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-image", expressionValue.value!!)
+        if (result?.isError == true) {
+            Log.w(TAG, "ICON_IMAGE_EXPRESSION_FAIL layer=${config.id} error=${result.error}")
+        } else {
+            imageModeExpressionSet.add(config.id)
+            Log.d(TAG, "ICON_IMAGE_EXPRESSION_SET layer=${config.id} symbolLayer=$symbolLayerId")
+        }
+    }
+
+    // endregion
+
+    // region Staggered batch creation
+
+    private fun drainCreationQueue() {
+        if (isDrainingCreationQueue || pendingCreations.isEmpty()) return
+        isDrainingCreationQueue = true
+
+        val batch = pendingCreations.take(maxCreatesPerFrame)
+        pendingCreations.subList(0, batch.size).clear()
+
+        batch.forEach { pending ->
+            createAnnotationForFeature(pending.config, pending.feature, pending.featureId, pending.rawFeatureId)
+        }
+
+        isDrainingCreationQueue = false
+
+        // If more remain, schedule next batch on the next frame
+        if (pendingCreations.isNotEmpty()) {
+            mainHandler.post { drainCreationQueue() }
+        }
+    }
+
+    // endregion
 
     /**
      * Gets the feature ID for annotation tracking.
@@ -340,16 +623,27 @@ class ViewLayerController(
     }
 
     /**
-     * Creates an annotation for a feature.
+     * Creates an annotation for a feature, with churn detection.
      * @param config The ViewLayer configuration
      * @param feature The map feature
      * @param featureId The namespaced feature ID for tracking (e.g., "sourceLayer_123")
      * @param rawFeatureId The raw feature ID for layer feature binding (e.g., "123"). Only needed when using associatedSymbolLayerId.
      */
     private fun createAnnotationForFeature(config: ViewLayerConfig, feature: Feature, featureId: String, rawFeatureId: String? = null) {
+        val createStartTime = SystemClock.elapsedRealtime()
         val geometry = feature.geometry()
         if (geometry !is Point) {
             return
+        }
+
+        // Churn detection — check if this feature was recently removed
+        val removeTime = recentlyRemoved[config.id]?.get(featureId)
+        if (removeTime != null) {
+            val removedAgoMs = createStartTime - removeTime
+            if (removedAgoMs < 5000L) {
+                Log.w(TAG, "CHURN_DETECTED id=$featureId removedAgo=${removedAgoMs}ms")
+                periodChurnCount++
+            }
         }
 
         // Map feature properties to view data using property mapping
@@ -398,20 +692,51 @@ class ViewLayerController(
         }
 
         featureAnnotations[config.id]?.add(annotationId)
+        val createDuration = SystemClock.elapsedRealtime() - createStartTime
+        Log.d(TAG, "ViewLayerController: createAnnotation | id=$annotationId, duration=${createDuration}ms")
     }
 
     private fun removeAnnotationForFeature(layerId: String, featureId: String) {
         val annotationId = "${layerId}_$featureId"
+        Log.d(TAG, "ViewLayerController: removeAnnotation | id=$annotationId")
         viewAnnotationController.remove(annotationId)
         featureAnnotations[layerId]?.remove(annotationId)
+
+        // Record removal time for churn detection
+        val now = SystemClock.elapsedRealtime()
+        recentlyRemoved.getOrPut(layerId) { mutableMapOf() }[featureId] = now
+
+        // Clean stale entries older than 10s
+        recentlyRemoved[layerId]?.entries?.removeIf { now - it.value >= 10000L }
     }
 
     private fun removeAllAnnotationsForLayer(layerId: String) {
+        // Clean up image-mode style images
+        registeredStyleImages[layerId]?.let { imageIds ->
+            imageIds.forEach { imageId ->
+                mapboxMap.getStyle()?.removeStyleImage(imageId)
+            }
+            registeredStyleImages.remove(layerId)
+        }
+
+        // Reset iconImage expression if it was set
+        if (imageModeExpressionSet.contains(layerId)) {
+            viewLayers[layerId]?.associatedSymbolLayerId?.let { symbolLayerId ->
+                mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-image", com.mapbox.bindgen.Value.valueOf(""))
+            }
+            imageModeExpressionSet.remove(layerId)
+        }
+
         featureAnnotations[layerId]?.toList()?.forEach { annotationId ->
             viewAnnotationController.remove(annotationId)
         }
         featureAnnotations[layerId]?.clear()
         visibleFeatureIds[layerId]?.clear()
+        hiddenTimestamps[layerId]?.clear()
+        hiddenAnnotations[layerId]?.clear()
+
+        // Remove pending creations for this layer
+        pendingCreations.removeAll { it.config.id == layerId }
     }
 
     fun dispose() {
@@ -421,8 +746,22 @@ class ViewLayerController(
         viewLayers.keys.forEach { layerId ->
             removeAllAnnotationsForLayer(layerId)
         }
+
+        // Unregister image-mode layers from ViewAnnotationController
+        viewLayers.values.forEach { config ->
+            if (config.associatedSymbolLayerId != null && config.imageCacheKeys != null) {
+                viewAnnotationController.unregisterImageModeLayer(config.associatedSymbolLayerId)
+            }
+        }
+
         viewLayers.clear()
         featureAnnotations.clear()
         visibleFeatureIds.clear()
+        hiddenTimestamps.clear()
+        hiddenAnnotations.clear()
+        pendingCreations.clear()
+        recentlyRemoved.clear()
+        registeredStyleImages.clear()
+        imageModeExpressionSet.clear()
     }
 }

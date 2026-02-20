@@ -1,13 +1,18 @@
 import UIKit
 import Flutter
-import ObjectiveC
+import QuartzCore
+import SwiftUI
 @_spi(Experimental) import MapboxMaps
 
-private struct AssociatedKeys {
-    static var annotationId = "annotationId"
+struct ImageModeLayerConfig {
+    let symbolLayerId: String
+    let viewLayerId: String
+    let sourceId: String
+    let sourceLayer: String?
+    let propertyMapping: [String: PropertyMappingConfig]
 }
 
-class ViewAnnotationController {
+class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     private let mapView: MapView
     private var annotations: [String: UIView] = [:]
     private var layoutNames: [String: String] = [:]
@@ -16,14 +21,37 @@ class ViewAnnotationController {
     private var viewAnnotationObjects: [String: ViewAnnotation] = [:]  // For layer feature binding
     private var visibilityObjects: [String: ViewAnnotationVisibility] = [:]  // Track visibility state per annotation
     private var annotationFeatures: [String: FeaturesetFeature?] = [:]  // Store FeaturesetFeature for tap callback
+    private var sizeCache: [String: CGSize] = [:]  // layoutName -> cached size to skip expensive sizeView()
+    private var imageCache: [String: UIImage] = [:]  // cacheKey -> rendered snapshot image
+    private var imageModeLayerConfigs: [String: ImageModeLayerConfig] = [:]  // symbolLayerId -> config for tap fallback
     private let tapEventChannel: FlutterMethodChannel
-    
+    private let mapTapGesture: UITapGestureRecognizer
+
     init(mapView: MapView, messenger: FlutterBinaryMessenger, channelSuffix: String) {
         self.mapView = mapView
         self.tapEventChannel = FlutterMethodChannel(
             name: "plugins.flutter.io.\(channelSuffix)/viewAnnotationTap",
             binaryMessenger: messenger
         )
+        self.mapTapGesture = UITapGestureRecognizer()
+        super.init()
+
+        mapTapGesture.addTarget(self, action: #selector(handleMapTap(_:)))
+        mapTapGesture.cancelsTouchesInView = false
+        mapTapGesture.delegate = self
+        mapView.addGestureRecognizer(mapTapGesture)
+
+        // Pre-warm UIHostingController to move ~248ms cold start off the annotation creation path
+        DispatchQueue.main.async {
+            let warmup = UIHostingController(rootView: EmptyView())
+            warmup.view.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+            warmup.view.layoutIfNeeded()
+            _ = warmup  // ensure not optimized away
+        }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return true
     }
     
     func add(
@@ -51,15 +79,20 @@ class ViewAnnotationController {
             ))
         }
         
-        // Size the view
-        let sizingResult = sizeView(view, id: id)
-        switch sizingResult {
-        case .failure:
-            return sizingResult
-        case .success:
-            break
+        // Size the view (use cache if available)
+        if let cachedSize = sizeCache[layoutName] {
+            view.frame = CGRect(origin: .zero, size: cachedSize)
+            NSLog("[ViewLayerPerf] SIZE_CACHE_HIT layoutName=%@ size=%.0fx%.0f", layoutName, cachedSize.width, cachedSize.height)
+        } else {
+            let sizingResult = sizeView(view, id: id, layoutName: layoutName)
+            switch sizingResult {
+            case .failure:
+                return sizingResult
+            case .success:
+                break
+            }
         }
-        
+
         let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
         
         let options = ViewAnnotationOptions(
@@ -68,14 +101,8 @@ class ViewAnnotationController {
             anchor: parseAnchor(anchor)
         )
 
-        // Add tap gesture recognizer
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-        view.addGestureRecognizer(tapGesture)
-        view.isUserInteractionEnabled = true
-        
-        // Store the annotation ID with the gesture recognizer for lookup
-        objc_setAssociatedObject(tapGesture, &AssociatedKeys.annotationId, id, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        
+        view.isUserInteractionEnabled = false
+
         do {
             try mapView.viewAnnotations.add(view, options: options)
             annotations[id] = view
@@ -102,6 +129,8 @@ class ViewAnnotationController {
         viewLayerId: String? = nil,
         feature: Feature? = nil
     ) -> Result<Void, Error> {
+        let perfMonitor = ViewLayerPerfMonitor.shared
+
         if annotations[id] != nil {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -110,11 +139,17 @@ class ViewAnnotationController {
             ))
         }
 
-        // Create visibility object for this annotation
+        // --- Live view mode ---
+
+        // --- Phase 1: Factory ---
+        let factoryStart = CACurrentMediaTime()
+        perfMonitor.beginOperation("factory:\(id)")
+
         let visibility = ViewAnnotationVisibility()
         visibilityObjects[id] = visibility
 
         guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data, visibility: visibility) else {
+            perfMonitor.endOperation("factory:\(id)")
             visibilityObjects.removeValue(forKey: id)
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -122,37 +157,49 @@ class ViewAnnotationController {
                 userInfo: [NSLocalizedDescriptionKey: "No view registered for '\(layoutName)'"]
             ))
         }
+        let factoryMs = (CACurrentMediaTime() - factoryStart) * 1000
+        perfMonitor.endOperation("factory:\(id)")
 
-        // Size the view
-        let sizingResult = sizeView(view, id: id)
-        switch sizingResult {
-        case .failure:
-            visibilityObjects.removeValue(forKey: id)
-            return sizingResult
-        case .success:
-            break
+        // --- Phase 2: Size (use cache if available) ---
+        let sizeStart = CACurrentMediaTime()
+        perfMonitor.beginOperation("size:\(id)")
+
+        if let cachedSize = sizeCache[layoutName] {
+            view.frame = CGRect(origin: .zero, size: cachedSize)
+            NSLog("[ViewLayerPerf] SIZE_CACHE_HIT layoutName=%@ size=%.0fx%.0f", layoutName, cachedSize.width, cachedSize.height)
+        } else {
+            let sizingResult = sizeView(view, id: id, layoutName: layoutName)
+            switch sizingResult {
+            case .failure:
+                _ = (CACurrentMediaTime() - sizeStart) * 1000
+                perfMonitor.endOperation("size:\(id)")
+                visibilityObjects.removeValue(forKey: id)
+                return sizingResult
+            case .success:
+                break
+            }
         }
 
-        // Create ViewAnnotation with layer feature binding
+        let sizeMs = (CACurrentMediaTime() - sizeStart) * 1000
+        perfMonitor.endOperation("size:\(id)")
+
+        // --- Phase 3: AddToMap ---
+        let addToMapStart = CACurrentMediaTime()
+        perfMonitor.beginOperation("addToMap:\(id)")
+
         let annotation = ViewAnnotation(
             annotatedFeature: .layerFeature(layerId: associatedLayerId, featureId: featureId),
             view: view
         )
 
-        // Configure anchor
         annotation.variableAnchors = [ViewAnnotationAnchorConfig(anchor: parseAnchor(anchor))]
         annotation.allowOverlap = allowOverlap
 
-        // Hook into visibility changes for animations
         annotation.onVisibilityChanged = { [weak self] isVisible in
             self?.visibilityObjects[id]?.isVisible = isVisible
         }
 
-        // Add tap gesture recognizer
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-        view.addGestureRecognizer(tapGesture)
-        view.isUserInteractionEnabled = true
-        objc_setAssociatedObject(tapGesture, &AssociatedKeys.annotationId, id, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        view.isUserInteractionEnabled = false
 
         mapView.viewAnnotations.add(annotation)
 
@@ -161,7 +208,6 @@ class ViewAnnotationController {
         annotationData[id] = data ?? [:]
         viewAnnotationObjects[id] = annotation
 
-        // Build and store FeaturesetFeature for tap callback
         if let feature = feature {
             let featuresetFeature = FeaturesetFeature(
                 id: FeaturesetFeatureId(id: featureId, namespace: nil),
@@ -174,6 +220,18 @@ class ViewAnnotationController {
         } else {
             annotationFeatures[id] = nil
         }
+
+        let addToMapMs = (CACurrentMediaTime() - addToMapStart) * 1000
+        perfMonitor.endOperation("addToMap:\(id)")
+
+        // Report breakdown to perf monitor
+        let breakdown = AnnotationTimingBreakdown(
+            id: id,
+            factoryMs: factoryMs,
+            sizeMs: sizeMs,
+            addToMapMs: addToMapMs
+        )
+        perfMonitor.recordAnnotationCreation(breakdown)
 
         return .success(())
     }
@@ -269,20 +327,20 @@ class ViewAnnotationController {
                 ))
             }
 
-            // Size the new view
-            let sizingResult = sizeView(newView, id: id)
-            switch sizingResult {
-            case .failure:
-                return sizingResult
-            case .success:
-                break
+            // Size the new view (use cache if available)
+            if let cachedSize = sizeCache[layoutName] {
+                newView.frame = CGRect(origin: .zero, size: cachedSize)
+            } else {
+                let sizingResult = sizeView(newView, id: id, layoutName: layoutName)
+                switch sizingResult {
+                case .failure:
+                    return sizingResult
+                case .success:
+                    break
+                }
             }
 
-            // Add tap gesture recognizer
-            let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-            newView.addGestureRecognizer(tapGesture)
-            newView.isUserInteractionEnabled = true
-            objc_setAssociatedObject(tapGesture, &AssociatedKeys.annotationId, id, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            newView.isUserInteractionEnabled = false
 
             // Add new view with updated options (should always have options for non-ViewLayer annotations)
             guard let opts = options else {
@@ -321,12 +379,16 @@ class ViewAnnotationController {
         return .success(())
     }
     
-    private func sizeView(_ view: UIView, id: String) -> Result<Void, Error> {
-        // Temporarily add to a container view to force layout calculation
+    private func sizeView(_ view: UIView, id: String, layoutName: String? = nil) -> Result<Void, Error> {
+        let sizeStartTime = CACurrentMediaTime()
+
+        // --- Sub-step: windowAttach ---
+        let windowAttachStart = CACurrentMediaTime()
+
         let containerView = UIView(frame: CGRect(x: -10000, y: -10000, width: 1000, height: 1000))
         containerView.isHidden = true
         containerView.addSubview(view)
-        
+
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
@@ -334,7 +396,7 @@ class ViewAnnotationController {
             view.bottomAnchor.constraint(lessThanOrEqualTo: containerView.bottomAnchor),
             view.trailingAnchor.constraint(lessThanOrEqualTo: containerView.trailingAnchor),
         ])
-        
+
         var window: UIWindow?
         if #available(iOS 15.0, *) {
             window = UIApplication.shared.connectedScenes
@@ -347,7 +409,7 @@ class ViewAnnotationController {
         } else {
             window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) ?? UIApplication.shared.windows.first
         }
-        
+
         guard let window = window ?? mapView.window else {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -355,37 +417,42 @@ class ViewAnnotationController {
                 userInfo: [NSLocalizedDescriptionKey: "Could not find window to temporarily attach view"]
             ))
         }
-        
+
         window.addSubview(containerView)
-        
-        // Force layout
+        let windowAttachMs = (CACurrentMediaTime() - windowAttachStart) * 1000
+
+        // --- Sub-step: layout ---
+        let layoutStart = CACurrentMediaTime()
+
         view.setNeedsLayout()
         view.layoutIfNeeded()
         containerView.layoutIfNeeded()
-        
-        // Try to get size from intrinsic content size first
+
+        let layoutMs = (CACurrentMediaTime() - layoutStart) * 1000
+
+        // --- Sub-step: measure ---
+        let measureStart = CACurrentMediaTime()
+
         var finalSize = view.intrinsicContentSize
-        
-        // If intrinsic size is invalid, try systemLayoutSizeFitting
+
         if finalSize.width <= 0 || finalSize.height <= 0 {
             finalSize = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         }
-        
-        // If still invalid, use frame size
+
         if finalSize.width <= 0 || finalSize.height <= 0 {
             finalSize = view.frame.size
         }
-        
-        // If still zero, set a default size
+
         if finalSize.width <= 0 || finalSize.height <= 0 {
             finalSize = CGSize(width: 100, height: 50)
         }
-        
-        // Set the final frame
+
         view.frame = CGRect(origin: .zero, size: finalSize)
         view.removeFromSuperview()
         containerView.removeFromSuperview()
-        
+
+        let measureMs = (CACurrentMediaTime() - measureStart) * 1000
+
         if view.frame.width <= 0 || view.frame.height <= 0 {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -393,11 +460,150 @@ class ViewAnnotationController {
                 userInfo: [NSLocalizedDescriptionKey: "View has invalid dimensions: width=\(view.frame.width), height=\(view.frame.height)"]
             ))
         }
-        
+
+        let totalMs = (CACurrentMediaTime() - sizeStartTime) * 1000
+        NSLog("[ViewLayerPerf] SIZE_BREAKDOWN id=%@ total=%.1f windowAttach=%.1f layout=%.1f measure=%.1f size=%.0fx%.0f",
+              id, totalMs, windowAttachMs, layoutMs, measureMs, view.frame.width, view.frame.height)
+
+        // Cache the size for this layoutName
+        if let layoutName = layoutName {
+            sizeCache[layoutName] = view.frame.size
+            NSLog("[ViewLayerPerf] SIZE_CACHE_STORE layoutName=%@ size=%.0fx%.0f", layoutName, view.frame.width, view.frame.height)
+        }
+
         return .success(())
     }
 
+    /// Renders a UIView to a UIImage snapshot.
+    /// Attaches the view to an offscreen window container, forces layout, then captures via drawHierarchy.
+    private func renderToImage(_ view: UIView) -> UIImage? {
+        let containerView = UIView(frame: CGRect(x: -10000, y: -10000, width: 1000, height: 1000))
+        // NOT hidden — drawHierarchy requires the view to be "visible" in the window
+        containerView.addSubview(view)
+
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
+            view.leadingAnchor.constraint(greaterThanOrEqualTo: containerView.leadingAnchor),
+            view.bottomAnchor.constraint(lessThanOrEqualTo: containerView.bottomAnchor),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: containerView.trailingAnchor),
+        ])
+
+        var window: UIWindow?
+        if #available(iOS 15.0, *) {
+            window = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+                .first(where: { $0.isKeyWindow }) ?? UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+                .first
+        } else {
+            window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) ?? UIApplication.shared.windows.first
+        }
+
+        guard let window = window ?? mapView.window else {
+            return nil
+        }
+
+        window.addSubview(containerView)
+
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        containerView.layoutIfNeeded()
+
+        var finalSize = view.intrinsicContentSize
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            finalSize = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        }
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            finalSize = view.frame.size
+        }
+        if finalSize.width <= 0 || finalSize.height <= 0 {
+            view.removeFromSuperview()
+            containerView.removeFromSuperview()
+            return nil
+        }
+
+        view.frame = CGRect(origin: .zero, size: finalSize)
+
+        let renderer = UIGraphicsImageRenderer(size: finalSize)
+        let image = renderer.image { _ in
+            view.drawHierarchy(in: CGRect(origin: .zero, size: finalSize), afterScreenUpdates: true)
+        }
+
+        view.removeFromSuperview()
+        containerView.removeFromSuperview()
+
+        return image
+    }
+
+    /// Computes a cache key from layoutName and the values of the specified data keys.
+    func computeImageCacheKey(layoutName: String, data: [String: Any]?, keys: [String]) -> String {
+        var parts = [layoutName]
+        for key in keys {
+            let value = data?[key]
+            parts.append("\(value ?? "nil")")
+        }
+        return parts.joined(separator: "_")
+    }
+
+    /// Renders a native view to a UIImage for use as a Mapbox style image.
+    /// Creates view via factory, renders to image, caches it, and returns the UIImage.
+    /// Does NOT create any ViewAnnotation.
+    func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String]) -> UIImage? {
+        let cacheKey = computeImageCacheKey(layoutName: layoutName, data: data, keys: cacheKeys)
+
+        if let cachedImage = imageCache[cacheKey] {
+            return cachedImage
+        }
+
+        let dummyVisibility = ViewAnnotationVisibility()
+        guard let view = ViewAnnotationRegistry.shared.createView(viewIdentifier: layoutName, args: data, visibility: dummyVisibility) else {
+            NSLog("[ViewLayerPerf] renderViewToImage FAILED — no factory for '%@'", layoutName)
+            return nil
+        }
+
+        guard let image = renderToImage(view) else {
+            NSLog("[ViewLayerPerf] renderViewToImage FAILED — renderToImage returned nil for '%@'", layoutName)
+            return nil
+        }
+
+        imageCache[cacheKey] = image
+        NSLog("[ViewLayerPerf] STYLE_IMAGE_RENDERED cacheKey=%@ size=%.0fx%.0f", cacheKey, image.size.width, image.size.height)
+        return image
+    }
+
+    // MARK: - Image mode layer registration (for tap fallback)
+
+    func registerImageModeLayer(_ config: ImageModeLayerConfig) {
+        imageModeLayerConfigs[config.symbolLayerId] = config
+    }
+
+    func unregisterImageModeLayer(symbolLayerId: String) {
+        imageModeLayerConfigs.removeValue(forKey: symbolLayerId)
+    }
+
+    func setVisible(id: String, visible: Bool) {
+        if let annotation = viewAnnotationObjects[id] {
+            annotation.visible = visible
+        } else if let view = annotations[id] {
+            view.isHidden = !visible
+        }
+    }
+
+    func isVisible(id: String) -> Bool {
+        if let annotation = viewAnnotationObjects[id] {
+            return annotation.visible
+        } else if let view = annotations[id] {
+            return !view.isHidden
+        }
+        return false
+    }
+
     func remove(id: String) -> Result<Void, Error> {
+        let removeStart = CACurrentMediaTime()
+
         // Check if using new ViewAnnotation API (layer feature binding)
         if let annotation = viewAnnotationObjects.removeValue(forKey: id) {
             annotation.remove()
@@ -407,6 +613,9 @@ class ViewAnnotationController {
             annotationData.removeValue(forKey: id)
             visibilityObjects.removeValue(forKey: id)
             annotationFeatures.removeValue(forKey: id)
+
+            let durationMs = (CACurrentMediaTime() - removeStart) * 1000
+            ViewLayerPerfMonitor.shared.recordAnnotationRemoval(id: id, durationMs: durationMs, remaining: annotations.count)
             return .success(())
         }
 
@@ -425,6 +634,9 @@ class ViewAnnotationController {
         annotationData.removeValue(forKey: id)
         visibilityObjects.removeValue(forKey: id)
         annotationFeatures.removeValue(forKey: id)
+
+        let durationMs = (CACurrentMediaTime() - removeStart) * 1000
+        ViewLayerPerfMonitor.shared.recordAnnotationRemoval(id: id, durationMs: durationMs, remaining: annotations.count)
         return .success(())
     }
 
@@ -476,26 +688,118 @@ class ViewAnnotationController {
         }
     }
     
-    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
-        guard let annotationId = objc_getAssociatedObject(gesture, &AssociatedKeys.annotationId) as? String else {
-            return
-        }
-        let data = annotationData[annotationId] ?? [:]
-        let feature = annotationFeatures[annotationId] ?? nil
+    @objc private func handleMapTap(_ gesture: UITapGestureRecognizer) {
+        let tapPoint = gesture.location(in: mapView)
 
-        // Manually serialize FeaturesetFeature to ensure nested objects are lists
-        var featureList: [Any?]? = nil
-        if let feature = feature {
-            let idList: [Any?]? = feature.id != nil ? [feature.id!.id, feature.id!.namespace] : nil
-            let featuresetList: [Any?] = [feature.featureset.featuresetId, feature.featureset.importId, feature.featureset.layerId]
-            featureList = [idList, featuresetList, feature.geometry, feature.properties, feature.state]
+        // Phase 1: Check ViewAnnotation views (existing behavior)
+        for (annotationId, view) in annotations {
+            if view.isHidden || view.alpha == 0 {
+                continue
+            }
+            if let visibility = visibilityObjects[annotationId], !visibility.isVisible {
+                continue
+            }
+
+            let pointInView = view.convert(tapPoint, from: mapView)
+            if view.bounds.contains(pointInView) {
+                let data = annotationData[annotationId] ?? [:]
+                let feature = annotationFeatures[annotationId] ?? nil
+
+                var featureList: [Any?]? = nil
+                if let feature = feature {
+                    let idList: [Any?]? = feature.id != nil ? [feature.id!.id, feature.id!.namespace] : nil
+                    let featuresetList: [Any?] = [feature.featureset.featuresetId, feature.featureset.importId, feature.featureset.layerId]
+                    featureList = [idList, featuresetList, feature.geometry, feature.properties, feature.state]
+                }
+
+                tapEventChannel.invokeMethod("onTap", arguments: [
+                    "annotationId": annotationId,
+                    "feature": featureList as Any,
+                    "data": data
+                ])
+                return
+            }
         }
 
-        tapEventChannel.invokeMethod("onTap", arguments: [
-            "annotationId": annotationId,
-            "feature": featureList,
-            "data": data
-        ])
+        // Phase 2: Check image-mode symbol layers via queryRenderedFeatures
+        guard !imageModeLayerConfigs.isEmpty else { return }
+
+        let tapRect = CGRect(x: tapPoint.x - 22, y: tapPoint.y - 22, width: 44, height: 44)
+        let layerIds = Array(imageModeLayerConfigs.keys)
+
+        let options = MapboxMaps.RenderedQueryOptions(layerIds: layerIds, filter: nil)
+        mapView.mapboxMap.queryRenderedFeatures(with: tapRect, options: options) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let queriedFeatures):
+                guard let first = queriedFeatures.first else { return }
+                let feature = first.queriedFeature.feature
+                let sourceLayerId = first.queriedFeature.sourceLayer ?? ""
+
+                // Find which image-mode config matched
+                for layerId in first.layers {
+                    guard let config = self.imageModeLayerConfigs[layerId] else { continue }
+
+                    // Build data from property mapping
+                    var viewData: [String: Any] = [:]
+                    for (dataKey, mapping) in config.propertyMapping {
+                        switch mapping.type {
+                        case "feature":
+                            if let propertyKey = mapping.propertyKey,
+                               let properties = feature.properties {
+                                if let value = properties[propertyKey] {
+                                    switch value {
+                                    case .string(let str): viewData[dataKey] = str
+                                    case .number(let num): viewData[dataKey] = num
+                                    case .boolean(let bool): viewData[dataKey] = bool
+                                    default: break
+                                    }
+                                }
+                            }
+                        case "constant":
+                            if let value = mapping.value { viewData[dataKey] = value }
+                        default: break
+                        }
+                    }
+
+                    // Build feature ID
+                    let featureId: String?
+                    if let id = feature.identifier {
+                        switch id {
+                        case .string(let str): featureId = str
+                        case .number(let num):
+                            featureId = num.truncatingRemainder(dividingBy: 1) == 0 ? String(Int64(num)) : String(num)
+                        @unknown default: featureId = nil
+                        }
+                    } else {
+                        featureId = nil
+                    }
+
+                    let annotationId = "\(config.viewLayerId)_\(sourceLayerId)_\(featureId ?? "unknown")"
+
+                    let featuresetFeature = FeaturesetFeature(
+                        id: featureId != nil ? FeaturesetFeatureId(id: featureId!, namespace: nil) : nil,
+                        featureset: FeaturesetDescriptor(featuresetId: nil, importId: nil, layerId: config.viewLayerId),
+                        geometry: feature.geometry?.toMap() ?? [:],
+                        properties: feature.properties?.turfRawValue ?? [:],
+                        state: [:]
+                    )
+
+                    let idList: [Any?]? = featuresetFeature.id != nil ? [featuresetFeature.id!.id, featuresetFeature.id!.namespace] : nil
+                    let featuresetList: [Any?] = [featuresetFeature.featureset.featuresetId, featuresetFeature.featureset.importId, featuresetFeature.featureset.layerId]
+                    let featureList: [Any?] = [idList, featuresetList, featuresetFeature.geometry, featuresetFeature.properties, featuresetFeature.state]
+
+                    self.tapEventChannel.invokeMethod("onTap", arguments: [
+                        "annotationId": annotationId,
+                        "feature": featureList as Any,
+                        "data": viewData
+                    ])
+                    return
+                }
+            case .failure(let error):
+                NSLog("[ViewLayerPerf] IMAGE_MODE_TAP_QUERY_ERROR: %@", error.localizedDescription)
+            }
+        }
     }
 }
 

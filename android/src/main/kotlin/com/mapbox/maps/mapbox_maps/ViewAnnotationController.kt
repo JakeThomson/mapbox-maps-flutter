@@ -3,11 +3,18 @@ package com.mapbox.maps.mapbox_maps
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import androidx.compose.runtime.CompositionLocalProvider
@@ -41,17 +48,31 @@ import com.mapbox.maps.viewannotation.ViewAnnotationManager
 import com.mapbox.maps.viewannotation.viewAnnotationOptions
 import com.mapbox.maps.viewannotation.*
 
+data class ImageModeLayerConfig(
+    val symbolLayerId: String,
+    val viewLayerId: String,
+    val sourceId: String,
+    val sourceLayer: String?,
+    val propertyMapping: Map<String, PropertyMappingConfig>
+)
+
 class ViewAnnotationController(
     private val mapView: MapView,
     private val messenger: BinaryMessenger,
     private val channelSuffix: String
 ) {
+    companion object {
+        private const val TAG = "ViewLayerPerf"
+    }
+
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
+    private val imageCache = mutableMapOf<String, Bitmap>()
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
     private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
     private val annotationFeatures = mutableMapOf<String, FeaturesetFeature?>()  // Store FeaturesetFeature for tap callback
+    private val imageModeLayerConfigs = mutableMapOf<String, ImageModeLayerConfig>()  // symbolLayerId -> config for tap fallback
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -63,19 +84,35 @@ class ViewAnnotationController(
     private val recomposer = Recomposer(coroutineScope.coroutineContext)
     private val mainHandler = Handler(Looper.getMainLooper())
     
+    private val tapDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            handleMapTap(e.rawX, e.rawY)
+            return false
+        }
+    })
+
     init {
         coroutineScope.launch {
             recomposer.runRecomposeAndApplyChanges()
+        }
+
+        mapView.setOnTouchListener { _, event ->
+            tapDetector.onTouchEvent(event)
+            false
         }
 
         // Register listener for visibility changes (e.g., due to collision detection)
         viewAnnotationManager.addOnViewAnnotationUpdatedListener(
             object : OnViewAnnotationUpdatedListener {
                 override fun onViewAnnotationVisibilityUpdated(view: View, visible: Boolean) {
+                    val scanStart = SystemClock.elapsedRealtime()
+                    val totalAnnotations = annotations.size
                     // Find annotation ID by view reference and update its visibility state
                     annotations.entries.find { it.value == view }?.key?.let { id ->
                         visibilityStates[id]?.value = visible
                     }
+                    val scanDuration = SystemClock.elapsedRealtime() - scanStart
+                    Log.d(TAG, "ViewAnnotationController: visibilityUpdate | scanned=$totalAnnotations, duration=${scanDuration}ms, visible=$visible")
                 }
             }
         )
@@ -131,17 +168,6 @@ class ViewAnnotationController(
         // For manual annotations, feature is null
         annotationFeatures[id] = null
 
-        // Set click listener immediately (before any async work)
-        container.setOnClickListener {
-            val tapData = annotationData[id] ?: emptyMap()
-            val feature = annotationFeatures[id]
-            tapEventChannel.invokeMethod("onTap", mapOf(
-                "annotationId" to id,
-                "feature" to serializeFeature(feature),
-                "data" to tapData
-            ))
-        }
-
         // Get the activity's root view to temporarily attach our view
         val activity = findActivity(context)
             ?: return Result.failure(Exception("Could not find Activity from context"))
@@ -182,6 +208,104 @@ class ViewAnnotationController(
         return Result.success(Unit)
     }
 
+    /// Computes a cache key from layoutName and the values of the specified data keys.
+    fun computeImageCacheKey(layoutName: String, data: Map<String, Any?>?, keys: List<String>): String {
+        val parts = mutableListOf(layoutName)
+        for (key in keys) {
+            parts.add("${data?.get(key) ?: "nil"}")
+        }
+        return parts.joinToString("_")
+    }
+
+    /// Renders a native view to a Bitmap for use as a Mapbox style image.
+    /// Creates ComposeView, composes, renders to Bitmap, caches it, returns via callback.
+    /// Does NOT create any ViewAnnotation.
+    fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, callback: (Bitmap?) -> Unit) {
+        val cacheKey = computeImageCacheKey(layoutName, data, cacheKeys)
+
+        val cachedBitmap = imageCache[cacheKey]
+        if (cachedBitmap != null) {
+            callback(cachedBitmap)
+            return
+        }
+
+        val factory = ViewAnnotationRegistry.getFactory(layoutName)
+        if (factory == null) {
+            Log.w(TAG, "renderViewToBitmap FAILED — no factory for '$layoutName'")
+            callback(null)
+            return
+        }
+
+        val container = FrameLayout(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val composeView = ComposeView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.setViewTreeLifecycleOwner(composeLifecycleOwner)
+        container.setViewTreeViewModelStoreOwner(composeLifecycleOwner)
+        container.setViewTreeSavedStateRegistryOwner(composeLifecycleOwner)
+        composeView.setParentCompositionContext(recomposer)
+        container.addView(composeView)
+
+        val activity = findActivity(context)
+        if (activity == null) {
+            Log.w(TAG, "renderViewToBitmap FAILED — no activity")
+            callback(null)
+            return
+        }
+        val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
+
+        container.visibility = View.INVISIBLE
+        rootView.addView(container)
+
+        composeView.setContent {
+            factory(data ?: emptyMap())
+        }
+
+        composeView.post {
+            composeView.post {
+                rootView.removeView(container)
+
+                val width = container.width
+                val height = container.height
+                if (width <= 0 || height <= 0) {
+                    Log.w(TAG, "renderViewToBitmap FAILED — size=${width}x${height}")
+                    callback(null)
+                    return@post
+                }
+
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                container.draw(canvas)
+
+                imageCache[cacheKey] = bitmap
+                Log.d(TAG, "STYLE_IMAGE_RENDERED cacheKey=$cacheKey size=${width}x${height}")
+                callback(bitmap)
+            }
+        }
+    }
+
+    // region Image mode layer registration (for tap fallback)
+
+    fun registerImageModeLayer(config: ImageModeLayerConfig) {
+        imageModeLayerConfigs[config.symbolLayerId] = config
+    }
+
+    fun unregisterImageModeLayer(symbolLayerId: String) {
+        imageModeLayerConfigs.remove(symbolLayerId)
+    }
+
+    // endregion
+
     /// Add a view annotation bound to a symbol layer feature.
     /// This enables shared collision detection between the view annotation and symbol layer.
     fun addWithLayerFeature(
@@ -195,9 +319,14 @@ class ViewAnnotationController(
         viewLayerId: String? = null,
         feature: Feature? = null
     ): Result<Unit> {
+        val addStartTime = SystemClock.elapsedRealtime()
+        Log.d(TAG, "ViewAnnotationController: addWithLayerFeature START | id=$id, layout=$layoutName")
+
         if (annotations.containsKey(id)) {
             return Result.failure(Exception("Annotation with id '$id' already exists"))
         }
+
+        // --- Live view mode ---
 
         val factory = ViewAnnotationRegistry.getFactory(layoutName)
             ?: return Result.failure(Exception("No view registered for '$layoutName'. Register it using ViewAnnotationRegistry.register()"))
@@ -231,31 +360,11 @@ class ViewAnnotationController(
         viewLayerAnnotations.add(id)  // Mark as ViewLayer annotation
 
         // Build and store FeaturesetFeature for tap callback
-        val featuresetFeature = feature?.let {
-            FeaturesetFeature(
-                id = FeaturesetFeatureId(featureId, null),
-                featureset = FeaturesetDescriptor(null, null, viewLayerId),
-                geometry = it.geometry()?.toMap() ?: emptyMap(),
-                properties = it.properties()?.let { props -> org.json.JSONObject(props.toString()).toFilteredMap() } ?: emptyMap(),
-                state = emptyMap()
-            )
-        }
-        annotationFeatures[id] = featuresetFeature
+        annotationFeatures[id] = buildFeaturesetFeature(featureId, viewLayerId, feature)
 
         // Create visibility state for this annotation (default to visible)
         val visibilityState = mutableStateOf(true)
         visibilityStates[id] = visibilityState
-
-        // Set click listener immediately (before any async work)
-        container.setOnClickListener {
-            val tapData = annotationData[id] ?: emptyMap()
-            val storedFeature = annotationFeatures[id]
-            tapEventChannel.invokeMethod("onTap", mapOf(
-                "annotationId" to id,
-                "feature" to serializeFeature(storedFeature),
-                "data" to tapData
-            ))
-        }
 
         // Get the activity's root view to temporarily attach our view
         val activity = findActivity(context)
@@ -276,6 +385,7 @@ class ViewAnnotationController(
         // Wait for composition and layout
         composeView.post {
             composeView.post {
+                val composeSetup = SystemClock.elapsedRealtime() - addStartTime
                 // Remove from root view
                 rootView.removeView(container)
                 container.visibility = View.VISIBLE
@@ -293,11 +403,25 @@ class ViewAnnotationController(
                     }
 
                     viewAnnotationManager.addViewAnnotation(container, options)
+                    Log.d(TAG, "ViewAnnotationController: addWithLayerFeature COMPLETE | id=$id, composeSetup=${composeSetup}ms, totalAnnotations=${annotations.size}")
                 }
             }
         }
 
         return Result.success(Unit)
+    }
+
+    /// Build FeaturesetFeature for tap callback storage.
+    private fun buildFeaturesetFeature(featureId: String, viewLayerId: String?, feature: Feature?): FeaturesetFeature? {
+        return feature?.let {
+            FeaturesetFeature(
+                id = FeaturesetFeatureId(featureId, null),
+                featureset = FeaturesetDescriptor(null, null, viewLayerId),
+                geometry = it.geometry()?.toMap() ?: emptyMap(),
+                properties = it.properties()?.let { props -> org.json.JSONObject(props.toString()).toFilteredMap() } ?: emptyMap(),
+                state = emptyMap()
+            )
+        }
     }
 
     fun update(
@@ -341,6 +465,11 @@ class ViewAnnotationController(
         return Result.success(Unit)
     }
 
+    fun setVisible(id: String, visible: Boolean) {
+        val container = annotations[id] ?: return
+        container.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
     fun remove(id: String): Result<Unit> {
         val view = annotations.remove(id)
             ?: return Result.failure(Exception("Annotation with id '$id' not found"))
@@ -351,6 +480,7 @@ class ViewAnnotationController(
         visibilityStates.remove(id)
         annotationFeatures.remove(id)
         viewAnnotationManager.removeViewAnnotation(view)
+        Log.d(TAG, "ViewAnnotationController: remove | id=$id, remaining=${annotations.size}")
         return Result.success(Unit)
     }
 
@@ -364,6 +494,105 @@ class ViewAnnotationController(
         viewLayerAnnotations.clear()
         visibilityStates.clear()
         annotationFeatures.clear()
+    }
+
+    private fun handleMapTap(rawX: Float, rawY: Float) {
+        val mapLocation = IntArray(2)
+        mapView.getLocationOnScreen(mapLocation)
+
+        // Phase 1: Check ViewAnnotation views (existing behavior)
+        for ((id, container) in annotations.entries.reversed()) {
+            if (container.visibility != View.VISIBLE) continue
+            val visState = visibilityStates[id]
+            if (visState != null && !visState.value) continue
+
+            val viewLocation = IntArray(2)
+            container.getLocationOnScreen(viewLocation)
+
+            val relX = rawX - viewLocation[0]
+            val relY = rawY - viewLocation[1]
+
+            if (relX >= 0 && relX <= container.width && relY >= 0 && relY <= container.height) {
+                val tapData = annotationData[id] ?: emptyMap()
+                val feature = annotationFeatures[id]
+                tapEventChannel.invokeMethod("onTap", mapOf(
+                    "annotationId" to id,
+                    "feature" to serializeFeature(feature),
+                    "data" to tapData
+                ))
+                return
+            }
+        }
+
+        // Phase 2: Check image-mode symbol layers via queryRenderedFeatures
+        if (imageModeLayerConfigs.isEmpty()) return
+
+        val tapX = (rawX - mapLocation[0]).toDouble()
+        val tapY = (rawY - mapLocation[1]).toDouble()
+
+        val screenBox = com.mapbox.maps.ScreenBox(
+            com.mapbox.maps.ScreenCoordinate(tapX - 22.0, tapY - 22.0),
+            com.mapbox.maps.ScreenCoordinate(tapX + 22.0, tapY + 22.0)
+        )
+
+        val layerIds = imageModeLayerConfigs.keys.toList()
+        val options = com.mapbox.maps.RenderedQueryOptions(layerIds, null)
+
+        mapView.mapboxMap.queryRenderedFeatures(
+            com.mapbox.maps.RenderedQueryGeometry.valueOf(screenBox),
+            options
+        ) { expected ->
+            if (expected.isError) {
+                Log.w(TAG, "IMAGE_MODE_TAP_QUERY_ERROR: ${expected.error}")
+                return@queryRenderedFeatures
+            }
+
+            val queriedFeatures = expected.value ?: return@queryRenderedFeatures
+            val first = queriedFeatures.firstOrNull() ?: return@queryRenderedFeatures
+            val feature = first.queriedFeature.feature
+            val sourceLayerId = first.queriedFeature.sourceLayer ?: ""
+
+            // Find which image-mode config matched
+            for (layerId in first.layers) {
+                val config = imageModeLayerConfigs[layerId] ?: continue
+
+                // Build data from property mapping
+                val viewData = mutableMapOf<String, Any?>()
+                config.propertyMapping.forEach { (dataKey, mapping) ->
+                    when (mapping.type) {
+                        "feature" -> {
+                            mapping.propertyKey?.let { propKey ->
+                                val value = feature.getProperty(propKey)
+                                viewData[dataKey] = value?.asString ?: value?.asJsonPrimitive
+                            }
+                        }
+                        "constant" -> viewData[dataKey] = mapping.value
+                    }
+                }
+
+                val featureId = feature.id() ?: feature.getStringProperty("id") ?: "unknown"
+                val annotationId = "${config.viewLayerId}_${sourceLayerId}_$featureId"
+
+                val featuresetFeature = FeaturesetFeature(
+                    id = FeaturesetFeatureId(featureId, null),
+                    featureset = FeaturesetDescriptor(null, null, config.viewLayerId),
+                    geometry = feature.geometry()?.toMap() ?: emptyMap(),
+                    properties = feature.properties()?.let { props ->
+                        org.json.JSONObject(props.toString()).toFilteredMap()
+                    } ?: emptyMap(),
+                    state = emptyMap()
+                )
+
+                mainHandler.post {
+                    tapEventChannel.invokeMethod("onTap", mapOf(
+                        "annotationId" to annotationId,
+                        "feature" to serializeFeature(featuresetFeature),
+                        "data" to viewData
+                    ))
+                }
+                return@queryRenderedFeatures
+            }
+        }
     }
 
     /// Serialize FeaturesetFeature to a list for method channel.
