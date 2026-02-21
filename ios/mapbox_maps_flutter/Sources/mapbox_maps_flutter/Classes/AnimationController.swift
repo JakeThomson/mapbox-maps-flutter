@@ -18,7 +18,10 @@ final class AnimationController: _AnimationManager {
         if mapAnimationOptions != nil && mapAnimationOptions!.duration != nil {
             cameraDuration = Double(mapAnimationOptions!.duration!) / 1000.0
         }
-        cancelable = camera.fly(to: cameraOptions.toCameraOptions(), duration: cameraDuration)
+        let opts = cameraOptions.toCameraOptions()
+        NSLog("[AnimationDebug] flyTo START center=%@ zoom=%@ duration=%.1fs",
+              String(describing: opts.center), String(describing: opts.zoom), cameraDuration)
+        cancelable = camera.fly(to: opts, duration: cameraDuration)
     }
 
     func pitchBy(pitch: Double, mapAnimationOptions: MapAnimationOptions?) throws {
@@ -39,6 +42,8 @@ final class AnimationController: _AnimationManager {
 
     func cancelCameraAnimation() throws {
         if cancelable != nil {
+            NSLog("[AnimationDebug] cancelCameraAnimation CALLED")
+            NSLog("[AnimationDebug] Call stack:\n%@", Thread.callStackSymbols.joined(separator: "\n"))
             cancelable?.cancel()
         }
     }

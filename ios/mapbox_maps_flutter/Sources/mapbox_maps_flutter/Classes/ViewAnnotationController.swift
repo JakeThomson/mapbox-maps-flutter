@@ -24,6 +24,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     private var sizeCache: [String: CGSize] = [:]  // layoutName -> cached size to skip expensive sizeView()
     private var imageCache: [String: UIImage] = [:]  // cacheKey -> rendered snapshot image
     private var imageModeLayerConfigs: [String: ImageModeLayerConfig] = [:]  // symbolLayerId -> config for tap fallback
+    var imageModeFeatureData: [String: [String: Any]] = [:]  // annotationId -> cached feature data from image-mode tap
     private let tapEventChannel: FlutterMethodChannel
     private let mapTapGesture: UITapGestureRecognizer
 
@@ -41,6 +42,15 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         mapTapGesture.delegate = self
         mapView.addGestureRecognizer(mapTapGesture)
 
+        // Make the map's own tap gesture recognizers require our tap to fail first.
+        // When our gesture succeeds (annotation hit), the SDK's tap gestures never fire,
+        // preventing the SDK from cancelling programmatic camera animations (e.g. flyTo).
+        for recognizer in mapView.gestureRecognizers ?? [] {
+            if let tap = recognizer as? UITapGestureRecognizer, tap != mapTapGesture {
+                tap.require(toFail: mapTapGesture)
+            }
+        }
+
         // Pre-warm UIHostingController to move ~248ms cold start off the annotation creation path
         DispatchQueue.main.async {
             let warmup = UIHostingController(rootView: EmptyView())
@@ -50,7 +60,27 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer == mapTapGesture else { return true }
+        let tapPoint = gestureRecognizer.location(in: mapView)
+        for (annotationId, view) in annotations {
+            if view.isHidden || view.alpha == 0 { continue }
+            if let visibility = visibilityObjects[annotationId], !visibility.isVisible { continue }
+            let pointInView = view.convert(tapPoint, from: mapView)
+            if view.bounds.contains(pointInView) { return true }
+        }
+        // Also check image-mode layers — let the gesture begin so handleMapTap
+        // can query rendered features; the SDK tap gestures will be suppressed.
+        if !imageModeLayerConfigs.isEmpty {
+            return true
+        }
+        return false  // No annotation hit → fail immediately, SDK gestures proceed
+    }
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Prevent the SDK's tap gesture from firing simultaneously with ours.
+        // Pan/pinch/rotation should still work simultaneously.
+        if otherGestureRecognizer is UITapGestureRecognizer { return false }
         return true
     }
     
@@ -657,6 +687,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         annotationData.removeAll()
         visibilityObjects.removeAll()
         annotationFeatures.removeAll()
+        imageModeFeatureData.removeAll()
     }
     
     private func parseAnchor(_ anchor: String?) -> MapboxMaps.ViewAnnotationAnchor {
@@ -690,6 +721,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     
     @objc private func handleMapTap(_ gesture: UITapGestureRecognizer) {
         let tapPoint = gesture.location(in: mapView)
+        NSLog("[ViewAnnotationTap] handleMapTap at (%.1f, %.1f) timestamp=%.3f", tapPoint.x, tapPoint.y, CACurrentMediaTime())
 
         // Phase 1: Check ViewAnnotation views (existing behavior)
         for (annotationId, view) in annotations {
@@ -702,6 +734,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
 
             let pointInView = view.convert(tapPoint, from: mapView)
             if view.bounds.contains(pointInView) {
+                NSLog("[ViewAnnotationTap] HIT annotationId=%@ timestamp=%.3f", annotationId, CACurrentMediaTime())
                 let data = annotationData[annotationId] ?? [:]
                 let feature = annotationFeatures[annotationId] ?? nil
 
@@ -776,6 +809,12 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
                     }
 
                     let annotationId = "\(config.viewLayerId)_\(sourceLayerId)_\(featureId ?? "unknown")"
+
+                    // Cache feature data for promote/demote
+                    if self.imageModeFeatureData.count > 100 {
+                        self.imageModeFeatureData.removeAll()
+                    }
+                    self.imageModeFeatureData[annotationId] = viewData
 
                     let featuresetFeature = FeaturesetFeature(
                         id: featureId != nil ? FeaturesetFeatureId(id: featureId!, namespace: nil) : nil,

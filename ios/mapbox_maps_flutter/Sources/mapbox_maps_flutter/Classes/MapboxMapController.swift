@@ -225,12 +225,25 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
             let latitude = args["latitude"] as? Double
             let longitude = args["longitude"] as? Double
             let data = args["data"] as? [String: Any]
-            
+
+            // Cancel any pending demotion (re-select during close animation)
+            viewLayerController?.cancelPendingDemotion(annotationId: id)
+
             switch viewAnnotationController.update(id: id, latitude: latitude, longitude: longitude, data: data) {
             case .success:
                 result(nil)
-            case .failure(let error):
-                result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: error.localizedDescription, details: nil))
+            case .failure:
+                // Annotation not found — try to promote from image mode
+                if let promoteResult = viewLayerController?.promoteFeature(annotationId: id, data: data) {
+                    switch promoteResult {
+                    case .success:
+                        result(nil)
+                    case .failure(let promoteError):
+                        result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: promoteError.localizedDescription, details: nil))
+                    }
+                } else {
+                    result(FlutterError(code: "VIEW_ANNOTATION_ERROR", message: "Annotation with id '\(id)' not found", details: nil))
+                }
             }
 
         case "viewAnnotation#remove":
@@ -239,7 +252,13 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
                 result(FlutterError(code: "INVALID_ARGS", message: "Missing required arguments", details: nil))
                 return
             }
-            
+
+            // Animated demote: if this was a promoted annotation, animate closed then remove
+            if viewLayerController?.demoteFeatureIfNeeded(annotationId: id) == true {
+                result(nil)
+                return
+            }
+
             switch viewAnnotationController.remove(id: id) {
             case .success:
                 result(nil)
@@ -248,6 +267,7 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
             }
 
         case "viewAnnotation#removeAll":
+            viewLayerController?.demoteAllFeatures()
             viewAnnotationController.removeAll()
             result(nil)
 

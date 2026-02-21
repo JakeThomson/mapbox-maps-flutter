@@ -73,6 +73,7 @@ class ViewAnnotationController(
     private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
     private val annotationFeatures = mutableMapOf<String, FeaturesetFeature?>()  // Store FeaturesetFeature for tap callback
     private val imageModeLayerConfigs = mutableMapOf<String, ImageModeLayerConfig>()  // symbolLayerId -> config for tap fallback
+    val imageModeFeatureData = mutableMapOf<String, Map<String, Any?>>()  // annotationId -> cached feature data from image-mode tap
     private val context = mapView.context
     private val viewAnnotationManager: ViewAnnotationManager
         get() = mapView.viewAnnotationManager
@@ -494,6 +495,7 @@ class ViewAnnotationController(
         viewLayerAnnotations.clear()
         visibilityStates.clear()
         annotationFeatures.clear()
+        imageModeFeatureData.clear()
     }
 
     private fun handleMapTap(rawX: Float, rawY: Float) {
@@ -572,6 +574,12 @@ class ViewAnnotationController(
 
                 val featureId = feature.id() ?: feature.getStringProperty("id") ?: "unknown"
                 val annotationId = "${config.viewLayerId}_${sourceLayerId}_$featureId"
+
+                // Cache feature data for promote/demote
+                if (imageModeFeatureData.size > 100) {
+                    imageModeFeatureData.clear()
+                }
+                imageModeFeatureData[annotationId] = viewData
 
                 val featuresetFeature = FeaturesetFeature(
                     id = FeaturesetFeatureId(featureId, null),

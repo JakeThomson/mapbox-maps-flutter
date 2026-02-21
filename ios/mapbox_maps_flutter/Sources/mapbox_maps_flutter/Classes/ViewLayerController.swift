@@ -25,6 +25,13 @@ struct PropertyMappingConfig {
     let value: Any?  // For constant type
 }
 
+struct PromotedFeatureInfo {
+    let configId: String
+    let sourceId: String
+    let sourceLayer: String?
+    let rawFeatureId: String
+}
+
 class ViewLayerController {
     private let mapView: MapView
     private let viewAnnotationController: ViewAnnotationController
@@ -45,6 +52,11 @@ class ViewLayerController {
     private var registeredStyleImages: [String: Set<String>] = [:]  // layerId -> set of registered style image IDs
     private var imageModeExpressionSet: Set<String> = []  // layers where iconImage expression has been set
 
+    // Promote/demote: tracking promoted features (image-mode → live ViewAnnotation)
+    private var promotedFeatures: [String: PromotedFeatureInfo] = [:]  // annotationId -> info
+    private var opacityExpressionSet: Set<String> = []  // layers where opacity expressions have been set
+    private var pendingDemotions: [String: DispatchWorkItem] = [:]  // annotationId -> delayed cleanup work item
+
     // Staggered batch creation
     private struct PendingCreate {
         let config: ViewLayerConfig
@@ -64,6 +76,8 @@ class ViewLayerController {
     private var cameraObserver: Cancelable?
     private var sourceDataObserver: Cancelable?
     private var mapIdleObserver: Cancelable?
+    private var styleImageMissingObserver: Cancelable?
+    private var styleImageRemoveUnusedObserver: Cancelable?
     private var lastUpdateTrigger: String = "initial"
     private var currentCycleId: UInt64 = 0
 
@@ -77,6 +91,8 @@ class ViewLayerController {
         setupCameraObserver()
         setupSourceDataObserver()
         setupMapIdleObserver()
+        setupStyleImageMissingObserver()
+        setupStyleImageRemoveUnusedObserver()
         ViewLayerPerfMonitor.shared.startMonitoring()
     }
 
@@ -182,6 +198,40 @@ class ViewLayerController {
                 NSLog("[ViewLayerPerf] ViewLayerController: mapIdle | scheduling debounced update")
                 self.lastUpdateTrigger = "mapIdle"
                 self.scheduleUpdate()
+            }
+        }
+    }
+
+    private func setupStyleImageMissingObserver() {
+        styleImageMissingObserver = mapView.mapboxMap.onStyleImageMissing.observe { [weak self] event in
+            guard let self = self else { return }
+            let imageId = event.imageId
+            // Check if this is one of our registered style images
+            for (layerId, imageIds) in self.registeredStyleImages {
+                if imageIds.contains(imageId) {
+                    NSLog("[ViewLayerDebug] STYLE_IMAGE_MISSING imageId=%@ layer=%@ — removing from tracking to force re-registration", imageId, layerId)
+                    self.registeredStyleImages[layerId]?.remove(imageId)
+                    self.lastUpdateTrigger = "styleImageMissing"
+                    self.scheduleUpdate()
+                    return
+                }
+            }
+        }
+    }
+
+    private func setupStyleImageRemoveUnusedObserver() {
+        styleImageRemoveUnusedObserver = mapView.mapboxMap.onStyleImageRemoveUnused.observe { [weak self] event in
+            guard let self = self else { return }
+            let imageId = event.imageId
+            // Check if this is one of our registered style images
+            for (layerId, imageIds) in self.registeredStyleImages {
+                if imageIds.contains(imageId) {
+                    NSLog("[ViewLayerDebug] STYLE_IMAGE_REMOVE_UNUSED imageId=%@ layer=%@ — removing from tracking to force re-registration", imageId, layerId)
+                    self.registeredStyleImages[layerId]?.remove(imageId)
+                    self.lastUpdateTrigger = "styleImageRemoveUnused"
+                    self.scheduleUpdate()
+                    return
+                }
             }
         }
     }
@@ -534,6 +584,7 @@ class ViewLayerController {
         // Extract unique cache keys from queried features
         var existingImages = registeredStyleImages[config.id] ?? []
         var newImagesCount = 0
+        var reRegisteredCount = 0
 
         for queriedFeature in queriedFeatures {
             guard queriedFeature.queriedFeature.source == config.sourceId else { continue }
@@ -567,7 +618,14 @@ class ViewLayerController {
 
             let cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: cacheKeys)
 
-            if existingImages.contains(cacheKey) { continue }
+            if existingImages.contains(cacheKey) {
+                if mapView.mapboxMap.imageExists(withId: cacheKey) {
+                    continue
+                }
+                existingImages.remove(cacheKey)
+                reRegisteredCount += 1
+                NSLog("[ViewLayerDebug] STYLE_IMAGE_STALE cacheKey=%@ — tracked but missing from style, will re-register", cacheKey)
+            }
 
             // Render new variation
             guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: cacheKeys) else {
@@ -606,11 +664,21 @@ class ViewLayerController {
             } catch {
                 NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
             }
+
+            // Set opacity expression for promote/demote (hides icon when feature state "promoted" is true)
+            let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
+            do {
+                try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
+                opacityExpressionSet.insert(config.id)
+                NSLog("[ViewLayerPerf] OPACITY_EXPRESSION_SET layer=%@ symbolLayer=%@", config.id, symbolLayerId)
+            } catch {
+                NSLog("[ViewLayerPerf] OPACITY_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
+            }
         }
 
         let batchMs = (CACurrentMediaTime() - batchStart) * 1000
-        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ batchMs=%.1f newImages=%d totalImages=%d",
-              config.id, batchMs, newImagesCount, existingImages.count)
+        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ batchMs=%.1f newImages=%d reRegistered=%d totalImages=%d",
+              config.id, batchMs, newImagesCount, reRegisteredCount, existingImages.count)
     }
 
     // MARK: - Staggered batch creation
@@ -752,7 +820,199 @@ class ViewLayerController {
         recentlyRemoved[layerId] = recentlyRemoved[layerId]?.filter { now - $0.value < 10.0 }
     }
 
+    // MARK: - Promote / Demote (image-mode → live ViewAnnotation)
+
+    func promoteFeature(annotationId: String, data: [String: Any]?) -> Result<Void, Error> {
+        // 1. Find matching image-mode config by prefix
+        guard let config = findImageModeConfig(for: annotationId) else {
+            return .failure(NSError(domain: "ViewLayerController", code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "No image-mode config matches annotation '\(annotationId)'"]))
+        }
+
+        // 2. Parse rawFeatureId from annotationId
+        let prefix = "\(config.id)_\(config.sourceLayer ?? "")_"
+        guard annotationId.hasPrefix(prefix) else {
+            return .failure(NSError(domain: "ViewLayerController", code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot parse feature ID from '\(annotationId)'"]))
+        }
+        let rawFeatureId = String(annotationId.dropFirst(prefix.count))
+
+        // 3. Check if annotation is being animated out — cancel and re-promote
+        if pendingDemotions[annotationId] != nil {
+            cancelPendingDemotion(annotationId: annotationId)
+            // View still exists, just update it back to selected
+            var mergedData = viewAnnotationController.imageModeFeatureData[annotationId] ?? [:]
+            if let data = data {
+                for (key, value) in data { mergedData[key] = value }
+            }
+            mergedData["selected"] = true
+            _ = viewAnnotationController.update(id: annotationId, latitude: nil, longitude: nil, data: mergedData)
+            return .success(())
+        }
+
+        // 4. Look up cached feature data from original tap
+        var mergedData = viewAnnotationController.imageModeFeatureData[annotationId] ?? [:]
+
+        // 5. Merge with provided data
+        if let data = data {
+            for (key, value) in data {
+                mergedData[key] = value
+            }
+        }
+
+        // 6. Set feature state to hide icon
+        mapView.mapboxMap.setFeatureState(
+            sourceId: config.sourceId,
+            sourceLayerId: config.sourceLayer,
+            featureId: rawFeatureId,
+            state: ["promoted": true]
+        ) { _ in }
+
+        // 7. Set opacity expression if not already set (safety fallback)
+        if let symbolLayerId = config.associatedSymbolLayerId, !opacityExpressionSet.contains(config.id) {
+            let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
+            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
+            opacityExpressionSet.insert(config.id)
+        }
+
+        // 8. Create live ViewAnnotation with selected=false (for opening animation)
+        guard let symbolLayerId = config.associatedSymbolLayerId else {
+            return .failure(NSError(domain: "ViewLayerController", code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "No associated symbol layer for config '\(config.id)'"]))
+        }
+
+        let savedSelected = mergedData["selected"]
+        mergedData["selected"] = false
+
+        let result = viewAnnotationController.addWithLayerFeature(
+            id: annotationId,
+            layoutName: config.layoutName,
+            associatedLayerId: symbolLayerId,
+            featureId: rawFeatureId,
+            data: mergedData,
+            anchor: config.anchor,
+            allowOverlap: config.allowOverlap,
+            viewLayerId: config.id
+        )
+
+        switch result {
+        case .success:
+            // 9. Track in promotedFeatures
+            promotedFeatures[annotationId] = PromotedFeatureInfo(
+                configId: config.id,
+                sourceId: config.sourceId,
+                sourceLayer: config.sourceLayer,
+                rawFeatureId: rawFeatureId
+            )
+
+            // 10. After short delay, update to selected=true to trigger opening animation
+            let selectedValue = savedSelected ?? true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self = self, self.promotedFeatures[annotationId] != nil else { return }
+                var openData = mergedData
+                openData["selected"] = selectedValue
+                _ = self.viewAnnotationController.update(id: annotationId, latitude: nil, longitude: nil, data: openData)
+            }
+
+            return .success(())
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    @discardableResult
+    func demoteFeatureIfNeeded(annotationId: String) -> Bool {
+        guard let info = promotedFeatures[annotationId] else {
+            return false
+        }
+
+        // Already pending demotion — skip
+        if pendingDemotions[annotationId] != nil { return true }
+
+        // 1. Update view to selected=false (triggers closing animation)
+        _ = viewAnnotationController.update(id: annotationId, latitude: nil, longitude: nil, data: ["selected": false])
+
+        // 2. Schedule delayed cleanup after animation completes
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pendingDemotions.removeValue(forKey: annotationId)
+            self.promotedFeatures.removeValue(forKey: annotationId)
+
+            // Remove feature state (restore icon)
+            self.mapView.mapboxMap.removeFeatureState(
+                sourceId: info.sourceId,
+                sourceLayerId: info.sourceLayer,
+                featureId: info.rawFeatureId,
+                stateKey: "promoted"
+            ) { _ in }
+
+            // Remove the ViewAnnotation
+            _ = self.viewAnnotationController.remove(id: annotationId)
+        }
+
+        pendingDemotions[annotationId] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: workItem)
+
+        return true
+    }
+
+    func cancelPendingDemotion(annotationId: String) {
+        if let workItem = pendingDemotions.removeValue(forKey: annotationId) {
+            workItem.cancel()
+        }
+    }
+
+    func demoteAllFeatures() {
+        // Cancel and immediately execute all pending demotions
+        for (annotationId, workItem) in pendingDemotions {
+            workItem.cancel()
+            pendingDemotions.removeValue(forKey: annotationId)
+        }
+
+        for (annotationId, info) in promotedFeatures {
+            mapView.mapboxMap.removeFeatureState(
+                sourceId: info.sourceId,
+                sourceLayerId: info.sourceLayer,
+                featureId: info.rawFeatureId,
+                stateKey: "promoted"
+            ) { _ in }
+            _ = viewAnnotationController.remove(id: annotationId)
+        }
+        promotedFeatures.removeAll()
+    }
+
+    private func findImageModeConfig(for annotationId: String) -> ViewLayerConfig? {
+        for config in viewLayers.values {
+            guard config.imageCacheKeys != nil else { continue }
+            let prefix = "\(config.id)_\(config.sourceLayer ?? "")_"
+            if annotationId.hasPrefix(prefix) {
+                return config
+            }
+        }
+        return nil
+    }
+
     private func removeAllAnnotations(forLayer layerId: String) {
+        // Cancel any pending demotions for this layer
+        let pendingForLayer = pendingDemotions.filter { (key, _) in key.hasPrefix(layerId) }
+        for (annotationId, workItem) in pendingForLayer {
+            workItem.cancel()
+            pendingDemotions.removeValue(forKey: annotationId)
+        }
+
+        // Demote all promoted features for this layer
+        let promotedForLayer = promotedFeatures.filter { $0.value.configId == layerId }
+        for (annotationId, info) in promotedForLayer {
+            mapView.mapboxMap.removeFeatureState(
+                sourceId: info.sourceId,
+                sourceLayerId: info.sourceLayer,
+                featureId: info.rawFeatureId,
+                stateKey: "promoted"
+            ) { _ in }
+            _ = viewAnnotationController.remove(id: annotationId)
+            promotedFeatures.removeValue(forKey: annotationId)
+        }
+
         // Clean up image-mode style images
         if let imageIds = registeredStyleImages[layerId] {
             for imageId in imageIds {
@@ -767,6 +1027,11 @@ class ViewLayerController {
                 try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: "")
             }
             imageModeExpressionSet.remove(layerId)
+        }
+
+        // Reset opacity expressions if they were set
+        if opacityExpressionSet.contains(layerId) {
+            opacityExpressionSet.remove(layerId)
         }
 
         guard let annotations = featureAnnotations[layerId] else { return }
@@ -789,6 +1054,14 @@ class ViewLayerController {
         cameraObserver?.cancel()
         sourceDataObserver?.cancel()
         mapIdleObserver?.cancel()
+        styleImageMissingObserver?.cancel()
+        styleImageRemoveUnusedObserver?.cancel()
+
+        // Cancel all pending demotions
+        for (_, workItem) in pendingDemotions {
+            workItem.cancel()
+        }
+        pendingDemotions.removeAll()
 
         for layerId in viewLayers.keys {
             removeAllAnnotations(forLayer: layerId)
@@ -810,5 +1083,7 @@ class ViewLayerController {
         recentlyRemoved.removeAll()
         registeredStyleImages.removeAll()
         imageModeExpressionSet.removeAll()
+        promotedFeatures.removeAll()
+        opacityExpressionSet.removeAll()
     }
 }

@@ -43,6 +43,13 @@ data class PropertyMappingConfig(
     val value: Any?  // For constant type
 )
 
+data class PromotedFeatureInfo(
+    val configId: String,
+    val sourceId: String,
+    val sourceLayer: String?,
+    val rawFeatureId: String
+)
+
 class ViewLayerController(
     private val mapView: MapView,
     private val mapboxMap: MapboxMap,
@@ -85,6 +92,11 @@ class ViewLayerController(
     // Image mode: style image tracking
     private val registeredStyleImages = mutableMapOf<String, MutableSet<String>>()  // layerId -> set of registered style image IDs
     private val imageModeExpressionSet = mutableSetOf<String>()  // layers where iconImage expression has been set
+
+    // Promote/demote: tracking promoted features (image-mode → live ViewAnnotation)
+    private val promotedFeatures = mutableMapOf<String, PromotedFeatureInfo>()  // annotationId -> info
+    private val opacityExpressionSet = mutableSetOf<String>()  // layers where opacity expressions have been set
+    private val pendingDemotions = mutableMapOf<String, Runnable>()  // annotationId -> delayed cleanup runnable
 
     private var cameraChangedCancelable: Cancelable? = null
     private var sourceDataCancelable: Cancelable? = null
@@ -565,6 +577,21 @@ class ViewLayerController(
             imageModeExpressionSet.add(config.id)
             Log.d(TAG, "ICON_IMAGE_EXPRESSION_SET layer=${config.id} symbolLayer=$symbolLayerId")
         }
+
+        // Set opacity expression for promote/demote (hides icon when feature state "promoted" is true)
+        if (!opacityExpressionSet.contains(config.id)) {
+            val opacityJson = """["case",["boolean",["feature-state","promoted"],false],0,1]"""
+            val opacityValue = com.mapbox.bindgen.Value.fromJson(opacityJson)
+            if (!opacityValue.isError) {
+                val iconResult = mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-opacity", opacityValue.value!!)
+                if (iconResult?.isError != true) {
+                    opacityExpressionSet.add(config.id)
+                    Log.d(TAG, "OPACITY_EXPRESSION_SET layer=${config.id} symbolLayer=$symbolLayerId")
+                } else {
+                    Log.w(TAG, "OPACITY_EXPRESSION_FAIL layer=${config.id}")
+                }
+            }
+        }
     }
 
     // endregion
@@ -710,7 +737,179 @@ class ViewLayerController(
         recentlyRemoved[layerId]?.entries?.removeIf { now - it.value >= 10000L }
     }
 
+    // region Promote / Demote (image-mode → live ViewAnnotation)
+
+    fun promoteFeature(annotationId: String, data: Map<String, Any?>?): Result<Unit> {
+        // 1. Find matching image-mode config by prefix
+        val config = findImageModeConfig(annotationId)
+            ?: return Result.failure(Exception("No image-mode config matches annotation '$annotationId'"))
+
+        // 2. Parse rawFeatureId from annotationId
+        val prefix = "${config.id}_${config.sourceLayer ?: ""}_"
+        if (!annotationId.startsWith(prefix)) {
+            return Result.failure(Exception("Cannot parse feature ID from '$annotationId'"))
+        }
+        val rawFeatureId = annotationId.removePrefix(prefix)
+
+        // 3. Check if annotation is being animated out — cancel and re-promote
+        if (pendingDemotions.containsKey(annotationId)) {
+            cancelPendingDemotion(annotationId)
+            // View still exists, just update it back to selected
+            val mergedData = (viewAnnotationController.imageModeFeatureData[annotationId] ?: emptyMap()).toMutableMap()
+            data?.forEach { (key, value) -> mergedData[key] = value }
+            mergedData["selected"] = true
+            viewAnnotationController.update(annotationId, null, null, mergedData)
+            return Result.success(Unit)
+        }
+
+        // 4. Look up cached feature data from original tap
+        val cachedData = viewAnnotationController.imageModeFeatureData[annotationId] ?: emptyMap()
+
+        // 5. Merge with provided data
+        val mergedData = cachedData.toMutableMap()
+        data?.forEach { (key, value) -> mergedData[key] = value }
+
+        // 6. Set feature state to hide icon
+        mapboxMap.setFeatureState(
+            config.sourceId,
+            config.sourceLayer,
+            rawFeatureId,
+            com.mapbox.bindgen.Value(hashMapOf("promoted" to com.mapbox.bindgen.Value(true)))
+        ) { }
+
+        // 7. Set opacity expression if not already set (safety fallback)
+        val symbolLayerId = config.associatedSymbolLayerId
+        if (symbolLayerId != null && !opacityExpressionSet.contains(config.id)) {
+            val opacityJson = """["case",["boolean",["feature-state","promoted"],false],0,1]"""
+            val opacityValue = com.mapbox.bindgen.Value.fromJson(opacityJson)
+            if (!opacityValue.isError) {
+                mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-opacity", opacityValue.value!!)
+                opacityExpressionSet.add(config.id)
+            }
+        }
+
+        // 8. Create live ViewAnnotation with selected=false (for opening animation)
+        if (symbolLayerId == null) {
+            return Result.failure(Exception("No associated symbol layer for config '${config.id}'"))
+        }
+
+        val savedSelected = mergedData["selected"]
+        mergedData["selected"] = false
+
+        val result = viewAnnotationController.addWithLayerFeature(
+            id = annotationId,
+            layoutName = config.layoutName,
+            associatedLayerId = symbolLayerId,
+            featureId = rawFeatureId,
+            data = mergedData,
+            anchor = config.anchor,
+            allowOverlap = config.allowOverlap,
+            viewLayerId = config.id
+        )
+
+        return result.map {
+            // 9. Track in promotedFeatures
+            promotedFeatures[annotationId] = PromotedFeatureInfo(
+                configId = config.id,
+                sourceId = config.sourceId,
+                sourceLayer = config.sourceLayer,
+                rawFeatureId = rawFeatureId
+            )
+
+            // 10. After short delay, update to selected=true to trigger opening animation
+            val selectedValue = savedSelected ?: true
+            mainHandler.postDelayed({
+                if (promotedFeatures.containsKey(annotationId)) {
+                    val openData = mergedData.toMutableMap()
+                    openData["selected"] = selectedValue
+                    viewAnnotationController.update(annotationId, null, null, openData)
+                }
+            }, 50L)
+        }
+    }
+
+    fun demoteFeatureIfNeeded(annotationId: String): Boolean {
+        val info = promotedFeatures[annotationId] ?: return false
+
+        // Already pending demotion — skip
+        if (pendingDemotions.containsKey(annotationId)) return true
+
+        // 1. Update view to selected=false (triggers closing animation)
+        viewAnnotationController.update(annotationId, null, null, mapOf("selected" to false))
+
+        // 2. Schedule delayed cleanup after animation completes
+        val runnable = Runnable {
+            pendingDemotions.remove(annotationId)
+            promotedFeatures.remove(annotationId)
+
+            // Remove feature state (restore icon)
+            mapboxMap.removeFeatureState(
+                info.sourceId,
+                info.sourceLayer,
+                info.rawFeatureId,
+                "promoted"
+            ) { }
+
+            // Remove the ViewAnnotation
+            viewAnnotationController.remove(annotationId)
+        }
+
+        pendingDemotions[annotationId] = runnable
+        mainHandler.postDelayed(runnable, 400L)
+
+        return true
+    }
+
+    fun cancelPendingDemotion(annotationId: String) {
+        pendingDemotions.remove(annotationId)?.let { runnable ->
+            mainHandler.removeCallbacks(runnable)
+        }
+    }
+
+    fun demoteAllFeatures() {
+        // Cancel and immediately clean up all pending demotions
+        pendingDemotions.forEach { (_, runnable) ->
+            mainHandler.removeCallbacks(runnable)
+        }
+        pendingDemotions.clear()
+
+        promotedFeatures.forEach { (annotationId, info) ->
+            mapboxMap.removeFeatureState(
+                info.sourceId,
+                info.sourceLayer,
+                info.rawFeatureId,
+                "promoted"
+            ) { }
+            viewAnnotationController.remove(annotationId)
+        }
+        promotedFeatures.clear()
+    }
+
+    private fun findImageModeConfig(annotationId: String): ViewLayerConfig? {
+        return viewLayers.values.firstOrNull { config ->
+            config.imageCacheKeys != null &&
+            annotationId.startsWith("${config.id}_${config.sourceLayer ?: ""}_")
+        }
+    }
+
+    // endregion
+
     private fun removeAllAnnotationsForLayer(layerId: String) {
+        // Cancel any pending demotions for this layer
+        val pendingForLayer = pendingDemotions.filter { (key, _) -> key.startsWith(layerId) }
+        pendingForLayer.forEach { (annotationId, runnable) ->
+            mainHandler.removeCallbacks(runnable)
+            pendingDemotions.remove(annotationId)
+        }
+
+        // Demote all promoted features for this layer
+        val promotedForLayer = promotedFeatures.filter { it.value.configId == layerId }
+        promotedForLayer.forEach { (annotationId, info) ->
+            mapboxMap.removeFeatureState(info.sourceId, info.sourceLayer, info.rawFeatureId, "promoted") { }
+            viewAnnotationController.remove(annotationId)
+            promotedFeatures.remove(annotationId)
+        }
+
         // Clean up image-mode style images
         registeredStyleImages[layerId]?.let { imageIds ->
             imageIds.forEach { imageId ->
@@ -726,6 +925,9 @@ class ViewLayerController(
             }
             imageModeExpressionSet.remove(layerId)
         }
+
+        // Reset opacity expressions if they were set
+        opacityExpressionSet.remove(layerId)
 
         featureAnnotations[layerId]?.toList()?.forEach { annotationId ->
             viewAnnotationController.remove(annotationId)
@@ -743,6 +945,13 @@ class ViewLayerController(
         cameraChangedCancelable?.cancel()
         sourceDataCancelable?.cancel()
         mapIdleCancelable?.cancel()
+
+        // Cancel all pending demotions
+        pendingDemotions.forEach { (_, runnable) ->
+            mainHandler.removeCallbacks(runnable)
+        }
+        pendingDemotions.clear()
+
         viewLayers.keys.forEach { layerId ->
             removeAllAnnotationsForLayer(layerId)
         }
@@ -763,5 +972,7 @@ class ViewLayerController(
         recentlyRemoved.clear()
         registeredStyleImages.clear()
         imageModeExpressionSet.clear()
+        promotedFeatures.clear()
+        opacityExpressionSet.clear()
     }
 }

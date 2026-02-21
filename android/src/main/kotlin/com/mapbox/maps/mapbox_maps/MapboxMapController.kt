@@ -379,17 +379,31 @@ class MapboxMapController(
         val longitude = call.argument<Double>("longitude")
         val data = call.argument<Map<String, Any?>>("data")
 
+        // Cancel any pending demotion (re-select during close animation)
+        viewLayerController.cancelPendingDemotion(id)
+
         viewAnnotationController.update(id, latitude, longitude, data)
           .onSuccess { result.success(null) }
-          .onFailure { result.error("VIEW_ANNOTATION_ERROR", it.message, null) }
+          .onFailure {
+            // Annotation not found — try to promote from image mode
+            viewLayerController.promoteFeature(id, data)
+              .onSuccess { result.success(null) }
+              .onFailure { promoteError -> result.error("VIEW_ANNOTATION_ERROR", promoteError.message, null) }
+          }
       }
       "viewAnnotation#remove" -> {
         val id = call.argument<String>("id")!!
+        // Animated demote: if this was a promoted annotation, animate closed then remove
+        if (viewLayerController.demoteFeatureIfNeeded(id)) {
+          result.success(null)
+          return
+        }
         viewAnnotationController.remove(id)
           .onSuccess { result.success(null) }
           .onFailure { result.error("VIEW_ANNOTATION_ERROR", it.message, null) }
       }
       "viewAnnotation#removeAll" -> {
+        viewLayerController.demoteAllFeatures()
         viewAnnotationController.removeAll()
         result.success(null)
       }
