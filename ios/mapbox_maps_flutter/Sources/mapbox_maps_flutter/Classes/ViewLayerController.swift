@@ -57,6 +57,10 @@ class ViewLayerController {
     private var opacityExpressionSet: Set<String> = []  // layers where opacity expressions have been set
     private var pendingDemotions: [String: DispatchWorkItem] = [:]  // annotationId -> delayed cleanup work item
 
+    // Image mode: initial batch tracking (hide symbol layer until first images render)
+    private var imageModeInitialBatchDone: Set<String> = []
+    private var needsImmediateUpdate = false
+
     // Staggered batch creation
     private struct PendingCreate {
         let config: ViewLayerConfig
@@ -127,6 +131,23 @@ class ViewLayerController {
                         sourceLayer: config.sourceLayer,
                         propertyMapping: config.propertyMapping
                     ))
+
+                    // Hide symbol layer until first image batch completes
+                    try? self.mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: 0)
+                    try? self.mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity", value: 0)
+
+                    // Eagerly set icon-image expression so features participate in queries
+                    if let cacheKeys = config.imageCacheKeys {
+                        var expression: [Any] = ["concat", "\(config.layoutName)_"]
+                        for (i, key) in cacheKeys.enumerated() {
+                            if i > 0 { expression.append("_") }
+                            expression.append(["get", key])
+                        }
+                        try? self.mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: expression)
+                        self.imageModeExpressionSet.insert(config.id)
+                    }
+
+                    self.needsImmediateUpdate = true
                 }
 
                 self.scheduleUpdate()
@@ -281,11 +302,21 @@ class ViewLayerController {
             return
         }
 
-        NSLog("[ViewLayerPerf] ViewLayerController: scheduleUpdate SCHEDULED | delay=%.0fms", debounceDelay * 1000)
         updatePending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay) { [weak self] in
-            self?.updatePending = false
-            self?.updateVisibleFeatures()
+
+        if needsImmediateUpdate {
+            needsImmediateUpdate = false
+            NSLog("[ViewLayerPerf] ViewLayerController: scheduleUpdate IMMEDIATE | bypassing debounce for initial image-mode load")
+            DispatchQueue.main.async { [weak self] in
+                self?.updatePending = false
+                self?.updateVisibleFeatures()
+            }
+        } else {
+            NSLog("[ViewLayerPerf] ViewLayerController: scheduleUpdate SCHEDULED | delay=%.0fms", debounceDelay * 1000)
+            DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay) { [weak self] in
+                self?.updatePending = false
+                self?.updateVisibleFeatures()
+            }
         }
     }
 
@@ -676,6 +707,26 @@ class ViewLayerController {
             }
         }
 
+        // Reveal symbol layer after first image batch completes
+        if !imageModeInitialBatchDone.contains(config.id) {
+            imageModeInitialBatchDone.insert(config.id)
+
+            // Set transitions for smooth ~200ms fade-in
+            let transition: [String: Any] = ["duration": 200, "delay": 0]
+            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity-transition", value: transition)
+            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity-transition", value: transition)
+
+            // Restore icon-opacity to promote/demote expression
+            let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
+            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
+            opacityExpressionSet.insert(config.id)
+
+            // Restore text-opacity
+            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity", value: 1)
+
+            NSLog("[ViewLayerPerf] IMAGE_MODE_REVEALED layer=%@ symbolLayer=%@", config.id, symbolLayerId)
+        }
+
         let batchMs = (CACurrentMediaTime() - batchStart) * 1000
         NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ batchMs=%.1f newImages=%d reRegistered=%d totalImages=%d",
               config.id, batchMs, newImagesCount, reRegisteredCount, existingImages.count)
@@ -1034,6 +1085,9 @@ class ViewLayerController {
             opacityExpressionSet.remove(layerId)
         }
 
+        // Reset initial batch tracking so reveal can re-trigger if layer is re-added
+        imageModeInitialBatchDone.remove(layerId)
+
         guard let annotations = featureAnnotations[layerId] else { return }
 
         for annotationId in annotations {
@@ -1083,6 +1137,7 @@ class ViewLayerController {
         recentlyRemoved.removeAll()
         registeredStyleImages.removeAll()
         imageModeExpressionSet.removeAll()
+        imageModeInitialBatchDone.removeAll()
         promotedFeatures.removeAll()
         opacityExpressionSet.removeAll()
     }

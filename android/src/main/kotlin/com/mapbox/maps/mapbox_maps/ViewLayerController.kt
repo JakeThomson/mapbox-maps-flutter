@@ -98,6 +98,10 @@ class ViewLayerController(
     private val opacityExpressionSet = mutableSetOf<String>()  // layers where opacity expressions have been set
     private val pendingDemotions = mutableMapOf<String, Runnable>()  // annotationId -> delayed cleanup runnable
 
+    // Image mode: initial batch tracking (hide symbol layer until first images render)
+    private val imageModeInitialBatchDone = mutableSetOf<String>()
+    private var needsImmediateUpdate = false
+
     private var cameraChangedCancelable: Cancelable? = null
     private var sourceDataCancelable: Cancelable? = null
     private var mapIdleCancelable: Cancelable? = null
@@ -152,6 +156,29 @@ class ViewLayerController(
                         sourceLayer = config.sourceLayer,
                         propertyMapping = config.propertyMapping
                     ))
+
+                    // Hide symbol layer until first image batch completes
+                    val style = mapboxMap.getStyle()
+                    style?.setStyleLayerProperty(config.associatedSymbolLayerId, "icon-opacity", com.mapbox.bindgen.Value.valueOf(0.0))
+                    style?.setStyleLayerProperty(config.associatedSymbolLayerId, "text-opacity", com.mapbox.bindgen.Value.valueOf(0.0))
+
+                    // Eagerly set icon-image expression so features participate in queries
+                    val cacheKeys = config.imageCacheKeys
+                    val parts = mutableListOf<Any>()
+                    parts.add("concat")
+                    parts.add("${config.layoutName}_")
+                    for ((i, key) in cacheKeys.withIndex()) {
+                        if (i > 0) parts.add("_")
+                        parts.add(listOf("get", key))
+                    }
+                    val expressionJson = org.json.JSONArray(parts).toString()
+                    val expressionValue = com.mapbox.bindgen.Value.fromJson(expressionJson)
+                    if (!expressionValue.isError) {
+                        style?.setStyleLayerProperty(config.associatedSymbolLayerId, "icon-image", expressionValue.value!!)
+                        imageModeExpressionSet.add(config.id)
+                    }
+
+                    needsImmediateUpdate = true
                 }
 
                 scheduleUpdate()
@@ -255,12 +282,22 @@ class ViewLayerController(
             return
         }
 
-        Log.d(TAG, "ViewLayerController: scheduleUpdate SCHEDULED | delay=${DEBOUNCE_DELAY_MS}ms")
         updatePending = true
-        mainHandler.postDelayed({
-            updatePending = false
-            updateVisibleFeatures()
-        }, DEBOUNCE_DELAY_MS)
+
+        if (needsImmediateUpdate) {
+            needsImmediateUpdate = false
+            Log.d(TAG, "ViewLayerController: scheduleUpdate IMMEDIATE | bypassing debounce for initial image-mode load")
+            mainHandler.post {
+                updatePending = false
+                updateVisibleFeatures()
+            }
+        } else {
+            Log.d(TAG, "ViewLayerController: scheduleUpdate SCHEDULED | delay=${DEBOUNCE_DELAY_MS}ms")
+            mainHandler.postDelayed({
+                updatePending = false
+                updateVisibleFeatures()
+            }, DEBOUNCE_DELAY_MS)
+        }
     }
 
     private fun updateVisibleFeatures() {
@@ -506,6 +543,7 @@ class ViewLayerController(
         if (totalToRender == 0) {
             // No new images needed, just ensure expression is set
             setIconImageExpression(config, symbolLayerId, cacheKeys)
+            revealImageModeLayerIfNeeded(config, symbolLayerId)
             val batchMs = SystemClock.elapsedRealtime() - batchStart
             Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=0 totalImages=${existingImages.size}")
             return
@@ -541,6 +579,7 @@ class ViewLayerController(
                 completedCount++
                 if (completedCount == totalToRender) {
                     setIconImageExpression(config, symbolLayerId, cacheKeys)
+                    revealImageModeLayerIfNeeded(config, symbolLayerId)
                     val batchMs = SystemClock.elapsedRealtime() - batchStart
                     Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=$totalToRender totalImages=${existingImages.size}")
                 }
@@ -592,6 +631,34 @@ class ViewLayerController(
                 }
             }
         }
+    }
+
+    private fun revealImageModeLayerIfNeeded(config: ViewLayerConfig, symbolLayerId: String) {
+        if (imageModeInitialBatchDone.contains(config.id)) return
+        imageModeInitialBatchDone.add(config.id)
+
+        val style = mapboxMap.getStyle() ?: return
+
+        // Set transitions for smooth ~200ms fade-in
+        val transition = hashMapOf(
+            "duration" to com.mapbox.bindgen.Value.valueOf(200L),
+            "delay" to com.mapbox.bindgen.Value.valueOf(0L)
+        )
+        style.setStyleLayerProperty(symbolLayerId, "icon-opacity-transition", com.mapbox.bindgen.Value.valueOf(transition))
+        style.setStyleLayerProperty(symbolLayerId, "text-opacity-transition", com.mapbox.bindgen.Value.valueOf(transition))
+
+        // Restore icon-opacity to promote/demote expression
+        val opacityJson = """["case",["boolean",["feature-state","promoted"],false],0,1]"""
+        val opacityValue = com.mapbox.bindgen.Value.fromJson(opacityJson)
+        if (!opacityValue.isError) {
+            style.setStyleLayerProperty(symbolLayerId, "icon-opacity", opacityValue.value!!)
+            opacityExpressionSet.add(config.id)
+        }
+
+        // Restore text-opacity
+        style.setStyleLayerProperty(symbolLayerId, "text-opacity", com.mapbox.bindgen.Value.valueOf(1.0))
+
+        Log.d(TAG, "IMAGE_MODE_REVEALED layer=${config.id} symbolLayer=$symbolLayerId")
     }
 
     // endregion
@@ -929,6 +996,9 @@ class ViewLayerController(
         // Reset opacity expressions if they were set
         opacityExpressionSet.remove(layerId)
 
+        // Reset initial batch tracking so reveal can re-trigger if layer is re-added
+        imageModeInitialBatchDone.remove(layerId)
+
         featureAnnotations[layerId]?.toList()?.forEach { annotationId ->
             viewAnnotationController.remove(annotationId)
         }
@@ -972,6 +1042,7 @@ class ViewLayerController(
         recentlyRemoved.clear()
         registeredStyleImages.clear()
         imageModeExpressionSet.clear()
+        imageModeInitialBatchDone.clear()
         promotedFeatures.clear()
         opacityExpressionSet.clear()
     }
