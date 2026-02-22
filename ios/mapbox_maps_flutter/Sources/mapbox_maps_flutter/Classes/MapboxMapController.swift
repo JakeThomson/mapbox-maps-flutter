@@ -231,6 +231,11 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
 
             switch viewAnnotationController.update(id: id, latitude: latitude, longitude: longitude, data: data) {
             case .success:
+                // Auto-demote: if a promoted feature was deselected,
+                // schedule swap back to style image after animation completes
+                if let data = data, let selected = data["selected"] as? Bool, selected == false {
+                    viewLayerController?.demoteFeatureIfNeeded(annotationId: id)
+                }
                 result(nil)
             case .failure:
                 // Annotation not found — try to promote from image mode

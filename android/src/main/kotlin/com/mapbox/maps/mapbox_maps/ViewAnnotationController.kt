@@ -221,7 +221,7 @@ class ViewAnnotationController(
     /// Renders a native view to a Bitmap for use as a Mapbox style image.
     /// Creates ComposeView, composes, renders to Bitmap, caches it, returns via callback.
     /// Does NOT create any ViewAnnotation.
-    fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, callback: (Bitmap?) -> Unit) {
+    fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, padding: Float = 0f, callback: (Bitmap?) -> Unit) {
         val cacheKey = computeImageCacheKey(layoutName, data, cacheKeys)
 
         val cachedBitmap = imageCache[cacheKey]
@@ -237,11 +237,16 @@ class ViewAnnotationController(
             return
         }
 
+        val density = context.resources.displayMetrics.density
+        val paddingPx = (padding * density).toInt()
+
         val container = FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
+            clipChildren = false
+            clipToPadding = false
         }
 
         val composeView = ComposeView(context).apply {
@@ -284,12 +289,16 @@ class ViewAnnotationController(
                     return@post
                 }
 
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val paddedWidth = width + paddingPx * 2
+                val paddedHeight = height + paddingPx * 2
+
+                val bitmap = Bitmap.createBitmap(paddedWidth, paddedHeight, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bitmap)
+                canvas.translate(paddingPx.toFloat(), paddingPx.toFloat())
                 container.draw(canvas)
 
                 imageCache[cacheKey] = bitmap
-                Log.d(TAG, "STYLE_IMAGE_RENDERED cacheKey=$cacheKey size=${width}x${height}")
+                Log.d(TAG, "STYLE_IMAGE_RENDERED cacheKey=$cacheKey size=${paddedWidth}x${paddedHeight} (content=${width}x${height} padding=${paddingPx}px)")
                 callback(bitmap)
             }
         }

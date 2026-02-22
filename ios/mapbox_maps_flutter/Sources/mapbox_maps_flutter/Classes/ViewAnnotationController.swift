@@ -506,11 +506,14 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
 
     /// Renders a UIView to a UIImage snapshot.
     /// Attaches the view to an offscreen window container, forces layout, then captures via drawHierarchy.
-    private func renderToImage(_ view: UIView) -> UIImage? {
+    /// - Parameter padding: Extra padding (in points) added around the view to prevent clipping of shadows/glows.
+    private func renderToImage(_ view: UIView, padding: CGFloat = 0) -> UIImage? {
         let containerView = UIView(frame: CGRect(x: -10000, y: -10000, width: 1000, height: 1000))
         // NOT hidden — drawHierarchy requires the view to be "visible" in the window
+        containerView.clipsToBounds = false
         containerView.addSubview(view)
 
+        view.clipsToBounds = false
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.topAnchor.constraint(greaterThanOrEqualTo: containerView.topAnchor),
@@ -555,11 +558,15 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
             return nil
         }
 
-        view.frame = CGRect(origin: .zero, size: finalSize)
+        let paddedSize = CGSize(
+            width: finalSize.width + padding * 2,
+            height: finalSize.height + padding * 2
+        )
+        view.frame = CGRect(x: padding, y: padding, width: finalSize.width, height: finalSize.height)
 
-        let renderer = UIGraphicsImageRenderer(size: finalSize)
+        let renderer = UIGraphicsImageRenderer(size: paddedSize)
         let image = renderer.image { _ in
-            view.drawHierarchy(in: CGRect(origin: .zero, size: finalSize), afterScreenUpdates: true)
+            view.drawHierarchy(in: CGRect(x: padding, y: padding, width: finalSize.width, height: finalSize.height), afterScreenUpdates: true)
         }
 
         view.removeFromSuperview()
@@ -581,7 +588,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     /// Renders a native view to a UIImage for use as a Mapbox style image.
     /// Creates view via factory, renders to image, caches it, and returns the UIImage.
     /// Does NOT create any ViewAnnotation.
-    func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String]) -> UIImage? {
+    func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String], padding: CGFloat = 0) -> UIImage? {
         let cacheKey = computeImageCacheKey(layoutName: layoutName, data: data, keys: cacheKeys)
 
         if let cachedImage = imageCache[cacheKey] {
@@ -594,7 +601,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
             return nil
         }
 
-        guard let image = renderToImage(view) else {
+        guard let image = renderToImage(view, padding: padding) else {
             NSLog("[ViewLayerPerf] renderViewToImage FAILED — renderToImage returned nil for '%@'", layoutName)
             return nil
         }

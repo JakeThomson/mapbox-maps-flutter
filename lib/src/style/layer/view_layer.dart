@@ -82,6 +82,7 @@ class ViewLayer extends Layer {
     String? this.associatedSymbolLayerId,
     int? this.maxVisibleAnnotations,
     List<String>? this.imageCacheKeys,
+    double? this.imageCachePadding,
   }) : super(
             id: id,
             visibility: visibility,
@@ -179,6 +180,13 @@ class ViewLayer extends Layer {
   /// When null (default), annotations use live views as before.
   List<String>? imageCacheKeys;
 
+  /// Extra padding (in logical points) added around the rendered image when
+  /// using imageCacheKeys. Use this to prevent clipping of shadows, glows,
+  /// or other effects that extend beyond the view bounds.
+  ///
+  /// Only applies when imageCacheKeys is set. Default: 0.
+  double? imageCachePadding;
+
   @override
   Future<String> _encode() async {
     var layout = {};
@@ -250,6 +258,9 @@ class ViewLayer extends Layer {
     if (imageCacheKeys != null) {
       properties["imageCacheKeys"] = imageCacheKeys!;
     }
+    if (imageCachePadding != null) {
+      properties["imageCachePadding"] = imageCachePadding!;
+    }
 
     return json.encode(properties);
   }
@@ -300,6 +311,7 @@ class ViewLayer extends Layer {
       associatedSymbolLayerId: map["associatedSymbolLayerId"] as String?,
       maxVisibleAnnotations: map["maxVisibleAnnotations"] as int?,
       imageCacheKeys: (map["imageCacheKeys"] as List?)?.cast<String>(),
+      imageCachePadding: (map["imageCachePadding"] as num?)?.toDouble(),
     );
   }
 }

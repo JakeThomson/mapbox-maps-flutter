@@ -383,7 +383,14 @@ class MapboxMapController(
         viewLayerController.cancelPendingDemotion(id)
 
         viewAnnotationController.update(id, latitude, longitude, data)
-          .onSuccess { result.success(null) }
+          .onSuccess {
+            // Auto-demote: if a promoted feature was deselected,
+            // schedule swap back to style image after animation completes
+            if (data?.get("selected") == false) {
+              viewLayerController.demoteFeatureIfNeeded(id)
+            }
+            result.success(null)
+          }
           .onFailure {
             // Annotation not found — try to promote from image mode
             viewLayerController.promoteFeature(id, data)

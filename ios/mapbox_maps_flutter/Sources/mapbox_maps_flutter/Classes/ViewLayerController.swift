@@ -17,6 +17,7 @@ struct ViewLayerConfig {
     let associatedSymbolLayerId: String?
     let maxVisibleAnnotations: Int?
     let imageCacheKeys: [String]?
+    let imageCachePadding: Double?
 }
 
 struct PropertyMappingConfig {
@@ -292,7 +293,8 @@ class ViewLayerController {
             maxZoom: obj["maxzoom"] as? Double,
             associatedSymbolLayerId: obj["associatedSymbolLayerId"] as? String,
             maxVisibleAnnotations: obj["maxVisibleAnnotations"] as? Int,
-            imageCacheKeys: obj["imageCacheKeys"] as? [String]
+            imageCacheKeys: obj["imageCacheKeys"] as? [String],
+            imageCachePadding: obj["imageCachePadding"] as? Double
         )
     }
 
@@ -659,7 +661,8 @@ class ViewLayerController {
             }
 
             // Render new variation
-            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: cacheKeys) else {
+            let padding = CGFloat(config.imageCachePadding ?? 0)
+            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: cacheKeys, padding: padding) else {
                 NSLog("[ViewLayerPerf] IMAGE_MODE_RENDER_FAIL cacheKey=%@", cacheKey)
                 continue
             }

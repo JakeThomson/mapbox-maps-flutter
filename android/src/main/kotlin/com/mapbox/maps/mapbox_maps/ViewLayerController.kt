@@ -34,7 +34,8 @@ data class ViewLayerConfig(
     val maxZoom: Double?,
     val associatedSymbolLayerId: String?,
     val maxVisibleAnnotations: Int?,
-    val imageCacheKeys: List<String>?
+    val imageCacheKeys: List<String>?,
+    val imageCachePadding: Double?
 )
 
 data class PropertyMappingConfig(
@@ -252,7 +253,8 @@ class ViewLayerController(
             maxVisibleAnnotations = if (obj.has("maxVisibleAnnotations")) obj.getInt("maxVisibleAnnotations") else null,
             imageCacheKeys = obj.optJSONArray("imageCacheKeys")?.let { arr ->
                 (0 until arr.length()).map { arr.getString(it) }
-            }
+            },
+            imageCachePadding = if (obj.has("imageCachePadding")) obj.getDouble("imageCachePadding") else null
         )
     }
 
@@ -549,8 +551,9 @@ class ViewLayerController(
             return
         }
 
+        val padding = (config.imageCachePadding ?: 0.0).toFloat()
         for ((cacheKey, viewData) in featuresToRender) {
-            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, cacheKeys) { bitmap ->
+            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, cacheKeys, padding) { bitmap ->
                 if (bitmap != null) {
                     // Convert Bitmap to Mapbox style image
                     val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
