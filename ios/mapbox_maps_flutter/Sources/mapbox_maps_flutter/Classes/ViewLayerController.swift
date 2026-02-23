@@ -18,6 +18,7 @@ struct ViewLayerConfig {
     let maxVisibleAnnotations: Int?
     let imageCacheKeys: [String]?
     let imageCachePadding: Double?
+    let useImageMode: Bool
 }
 
 struct PropertyMappingConfig {
@@ -124,7 +125,7 @@ class ViewLayerController {
                 self.visibleFeatureIds[config.id] = []
 
                 // Register image-mode layer for tap fallback
-                if config.imageCacheKeys != nil, let symbolLayerId = config.associatedSymbolLayerId {
+                if self.isImageMode(config), let symbolLayerId = config.associatedSymbolLayerId {
                     self.viewAnnotationController.registerImageModeLayer(ImageModeLayerConfig(
                         symbolLayerId: symbolLayerId,
                         viewLayerId: config.id,
@@ -138,9 +139,9 @@ class ViewLayerController {
                     try? self.mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity", value: 0)
 
                     // Eagerly set icon-image expression so features participate in queries
-                    if let cacheKeys = config.imageCacheKeys {
+                    if let keys = self.getEffectiveKeys(config) {
                         var expression: [Any] = ["concat", "\(config.layoutName)_"]
-                        for (i, key) in cacheKeys.enumerated() {
+                        for (i, key) in keys.expressionKeys.enumerated() {
                             if i > 0 { expression.append("_") }
                             expression.append(["get", key])
                         }
@@ -294,8 +295,35 @@ class ViewLayerController {
             associatedSymbolLayerId: obj["associatedSymbolLayerId"] as? String,
             maxVisibleAnnotations: obj["maxVisibleAnnotations"] as? Int,
             imageCacheKeys: obj["imageCacheKeys"] as? [String],
-            imageCachePadding: obj["imageCachePadding"] as? Double
+            imageCachePadding: obj["imageCachePadding"] as? Double,
+            useImageMode: obj["useImageMode"] as? Bool ?? false
         )
+    }
+
+    private func isImageMode(_ config: ViewLayerConfig) -> Bool {
+        return config.useImageMode || config.imageCacheKeys != nil
+    }
+
+    /// Returns (dataKeys, expressionKeys) for image mode, or nil if not image mode.
+    /// - dataKeys: used in computeImageCacheKey to look up values in viewData
+    /// - expressionKeys: used in ["get", key] for the icon-image expression
+    /// When imageCacheKeys is explicitly provided, both lists are the same.
+    /// When auto-derived, dataKeys come from propertyMapping keys and expressionKeys
+    /// come from the FeatureProperty propertyKey values.
+    private func getEffectiveKeys(_ config: ViewLayerConfig) -> (dataKeys: [String], expressionKeys: [String])? {
+        if let cacheKeys = config.imageCacheKeys {
+            return (cacheKeys, cacheKeys)
+        }
+        guard config.useImageMode else { return nil }
+        var dataKeys: [String] = []
+        var exprKeys: [String] = []
+        for (dataKey, mapping) in config.propertyMapping {
+            if mapping.type == "feature", let propertyKey = mapping.propertyKey {
+                dataKeys.append(dataKey)
+                exprKeys.append(propertyKey)
+            }
+        }
+        return (dataKeys, exprKeys)
     }
 
     private func scheduleUpdate() {
@@ -389,7 +417,7 @@ class ViewLayerController {
             switch result {
             case .success(let queriedFeatures):
                 // --- Image mode short-circuit: render to style images, skip ViewAnnotations ---
-                if config.imageCacheKeys != nil {
+                if self.isImageMode(config) {
                     self.handleImageModeFeatures(config: config, queriedFeatures: queriedFeatures, cycleId: cycleId)
                     return
                 }
@@ -609,8 +637,10 @@ class ViewLayerController {
     // MARK: - Image mode (style image rendering)
 
     private func handleImageModeFeatures(config: ViewLayerConfig, queriedFeatures: [MapboxMaps.QueriedRenderedFeature], cycleId: UInt64) {
-        guard let cacheKeys = config.imageCacheKeys,
+        guard let keys = getEffectiveKeys(config),
               let symbolLayerId = config.associatedSymbolLayerId else { return }
+        let dataKeys = keys.dataKeys
+        let exprKeys = keys.expressionKeys
 
         let batchStart = CACurrentMediaTime()
 
@@ -649,7 +679,7 @@ class ViewLayerController {
                 }
             }
 
-            let cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: cacheKeys)
+            let cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: dataKeys)
 
             if existingImages.contains(cacheKey) {
                 if mapView.mapboxMap.imageExists(withId: cacheKey) {
@@ -662,7 +692,7 @@ class ViewLayerController {
 
             // Render new variation
             let padding = CGFloat(config.imageCachePadding ?? 0)
-            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: cacheKeys, padding: padding) else {
+            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: dataKeys, padding: padding) else {
                 NSLog("[ViewLayerPerf] IMAGE_MODE_RENDER_FAIL cacheKey=%@", cacheKey)
                 continue
             }
@@ -684,7 +714,7 @@ class ViewLayerController {
         if !imageModeExpressionSet.contains(config.id) {
             // Build expression: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
             var expression: [Any] = ["concat", "\(config.layoutName)_"]
-            for (i, key) in cacheKeys.enumerated() {
+            for (i, key) in exprKeys.enumerated() {
                 if i > 0 {
                     expression.append("_")
                 }
@@ -1037,7 +1067,7 @@ class ViewLayerController {
 
     private func findImageModeConfig(for annotationId: String) -> ViewLayerConfig? {
         for config in viewLayers.values {
-            guard config.imageCacheKeys != nil else { continue }
+            guard isImageMode(config) else { continue }
             let prefix = "\(config.id)_\(config.sourceLayer ?? "")_"
             if annotationId.hasPrefix(prefix) {
                 return config
@@ -1126,7 +1156,7 @@ class ViewLayerController {
 
         // Unregister image-mode layers from ViewAnnotationController
         for config in viewLayers.values {
-            if let symbolLayerId = config.associatedSymbolLayerId, config.imageCacheKeys != nil {
+            if let symbolLayerId = config.associatedSymbolLayerId, isImageMode(config) {
                 viewAnnotationController.unregisterImageModeLayer(symbolLayerId: symbolLayerId)
             }
         }

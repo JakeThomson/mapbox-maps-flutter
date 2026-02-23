@@ -35,7 +35,8 @@ data class ViewLayerConfig(
     val associatedSymbolLayerId: String?,
     val maxVisibleAnnotations: Int?,
     val imageCacheKeys: List<String>?,
-    val imageCachePadding: Double?
+    val imageCachePadding: Double?,
+    val useImageMode: Boolean
 )
 
 data class PropertyMappingConfig(
@@ -149,7 +150,7 @@ class ViewLayerController(
                 visibleFeatureIds[config.id] = mutableSetOf()
 
                 // Register image-mode layer for tap fallback
-                if (config.imageCacheKeys != null && config.associatedSymbolLayerId != null) {
+                if (isImageMode(config) && config.associatedSymbolLayerId != null) {
                     viewAnnotationController.registerImageModeLayer(ImageModeLayerConfig(
                         symbolLayerId = config.associatedSymbolLayerId,
                         viewLayerId = config.id,
@@ -164,11 +165,11 @@ class ViewLayerController(
                     style?.setStyleLayerProperty(config.associatedSymbolLayerId, "text-opacity", com.mapbox.bindgen.Value.valueOf(0.0))
 
                     // Eagerly set icon-image expression so features participate in queries
-                    val cacheKeys = config.imageCacheKeys
+                    val (_, exprKeys) = getEffectiveKeys(config) ?: (emptyList<String>() to emptyList<String>())
                     val parts = mutableListOf<Any>()
                     parts.add("concat")
                     parts.add("${config.layoutName}_")
-                    for ((i, key) in cacheKeys.withIndex()) {
+                    for ((i, key) in exprKeys.withIndex()) {
                         if (i > 0) parts.add("_")
                         parts.add(listOf("get", key))
                     }
@@ -254,7 +255,8 @@ class ViewLayerController(
             imageCacheKeys = obj.optJSONArray("imageCacheKeys")?.let { arr ->
                 (0 until arr.length()).map { arr.getString(it) }
             },
-            imageCachePadding = if (obj.has("imageCachePadding")) obj.getDouble("imageCachePadding") else null
+            imageCachePadding = if (obj.has("imageCachePadding")) obj.getDouble("imageCachePadding") else null,
+            useImageMode = obj.optBoolean("useImageMode", false)
         )
     }
 
@@ -276,6 +278,33 @@ class ViewLayerController(
             }
         }
         return result
+    }
+
+    private fun isImageMode(config: ViewLayerConfig): Boolean =
+        config.useImageMode || config.imageCacheKeys != null
+
+    /**
+     * Returns (dataKeys, expressionKeys) for image mode, or null if not image mode.
+     * - dataKeys: used in computeImageCacheKey to look up values in viewData
+     * - expressionKeys: used in ["get", key] for the icon-image expression
+     * When imageCacheKeys is explicitly provided, both lists are the same.
+     * When auto-derived, dataKeys come from propertyMapping keys and expressionKeys
+     * come from the FeatureProperty propertyKey values.
+     */
+    private fun getEffectiveKeys(config: ViewLayerConfig): Pair<List<String>, List<String>>? {
+        if (config.imageCacheKeys != null) {
+            return config.imageCacheKeys to config.imageCacheKeys
+        }
+        if (!config.useImageMode) return null
+        val dataKeys = mutableListOf<String>()
+        val exprKeys = mutableListOf<String>()
+        for ((dataKey, mapping) in config.propertyMapping) {
+            if (mapping.type == "feature" && mapping.propertyKey != null) {
+                dataKeys.add(dataKey)
+                exprKeys.add(mapping.propertyKey)
+            }
+        }
+        return dataKeys to exprKeys
     }
 
     private fun scheduleUpdate() {
@@ -359,7 +388,7 @@ class ViewLayerController(
 
                 expected.value?.let { queriedRenderedFeatures ->
                     // --- Image mode short-circuit: render to style images, skip ViewAnnotations ---
-                    if (config.imageCacheKeys != null) {
+                    if (isImageMode(config)) {
                         handleImageModeFeatures(config, queriedRenderedFeatures)
                         return@let
                     }
@@ -502,7 +531,7 @@ class ViewLayerController(
     // region Image mode (style image rendering)
 
     private fun handleImageModeFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
-        val cacheKeys = config.imageCacheKeys ?: return
+        val (dataKeys, exprKeys) = getEffectiveKeys(config) ?: return
         val symbolLayerId = config.associatedSymbolLayerId ?: return
 
         val batchStart = SystemClock.elapsedRealtime()
@@ -531,7 +560,7 @@ class ViewLayerController(
                 }
             }
 
-            val cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, cacheKeys)
+            val cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, dataKeys)
             if (existingImages.contains(cacheKey)) continue
             if (featuresToRender.any { it.first == cacheKey }) continue
 
@@ -544,7 +573,7 @@ class ViewLayerController(
 
         if (totalToRender == 0) {
             // No new images needed, just ensure expression is set
-            setIconImageExpression(config, symbolLayerId, cacheKeys)
+            setIconImageExpression(config, symbolLayerId, exprKeys)
             revealImageModeLayerIfNeeded(config, symbolLayerId)
             val batchMs = SystemClock.elapsedRealtime() - batchStart
             Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=0 totalImages=${existingImages.size}")
@@ -553,7 +582,7 @@ class ViewLayerController(
 
         val padding = (config.imageCachePadding ?: 0.0).toFloat()
         for ((cacheKey, viewData) in featuresToRender) {
-            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, cacheKeys, padding) { bitmap ->
+            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, dataKeys, padding) { bitmap ->
                 if (bitmap != null) {
                     // Convert Bitmap to Mapbox style image
                     val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -581,7 +610,7 @@ class ViewLayerController(
 
                 completedCount++
                 if (completedCount == totalToRender) {
-                    setIconImageExpression(config, symbolLayerId, cacheKeys)
+                    setIconImageExpression(config, symbolLayerId, exprKeys)
                     revealImageModeLayerIfNeeded(config, symbolLayerId)
                     val batchMs = SystemClock.elapsedRealtime() - batchStart
                     Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=$totalToRender totalImages=${existingImages.size}")
@@ -590,14 +619,14 @@ class ViewLayerController(
         }
     }
 
-    private fun setIconImageExpression(config: ViewLayerConfig, symbolLayerId: String, cacheKeys: List<String>) {
+    private fun setIconImageExpression(config: ViewLayerConfig, symbolLayerId: String, expressionKeys: List<String>) {
         if (imageModeExpressionSet.contains(config.id)) return
 
         // Build expression JSON: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
         val parts = mutableListOf<Any>()
         parts.add("concat")
         parts.add("${config.layoutName}_")
-        for ((i, key) in cacheKeys.withIndex()) {
+        for ((i, key) in expressionKeys.withIndex()) {
             if (i > 0) {
                 parts.add("_")
             }
@@ -957,7 +986,7 @@ class ViewLayerController(
 
     private fun findImageModeConfig(annotationId: String): ViewLayerConfig? {
         return viewLayers.values.firstOrNull { config ->
-            config.imageCacheKeys != null &&
+            isImageMode(config) &&
             annotationId.startsWith("${config.id}_${config.sourceLayer ?: ""}_")
         }
     }
@@ -1031,7 +1060,7 @@ class ViewLayerController(
 
         // Unregister image-mode layers from ViewAnnotationController
         viewLayers.values.forEach { config ->
-            if (config.associatedSymbolLayerId != null && config.imageCacheKeys != null) {
+            if (config.associatedSymbolLayerId != null && isImageMode(config)) {
                 viewAnnotationController.unregisterImageModeLayer(config.associatedSymbolLayerId)
             }
         }

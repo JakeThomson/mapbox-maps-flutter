@@ -83,6 +83,7 @@ class ViewLayer extends Layer {
     int? this.maxVisibleAnnotations,
     List<String>? this.imageCacheKeys,
     double? this.imageCachePadding,
+    bool? this.useImageMode,
   }) : super(
             id: id,
             visibility: visibility,
@@ -181,11 +182,24 @@ class ViewLayer extends Layer {
   List<String>? imageCacheKeys;
 
   /// Extra padding (in logical points) added around the rendered image when
-  /// using imageCacheKeys. Use this to prevent clipping of shadows, glows,
+  /// using image mode. Use this to prevent clipping of shadows, glows,
   /// or other effects that extend beyond the view bounds.
   ///
-  /// Only applies when imageCacheKeys is set. Default: 0.
+  /// Only applies when image mode is active. Default: 0.
   double? imageCachePadding;
+
+  /// Enables image mode rendering without explicit cache keys.
+  ///
+  /// When true, annotation views are rendered to static images (like imageCacheKeys)
+  /// but cache keys are auto-derived from all FeatureProperty entries in propertyMapping.
+  /// This is useful for cluster layers where every feature is unique and cache
+  /// deduplication provides no benefit, but the performance win of static images
+  /// over live views is still desirable.
+  ///
+  /// Image mode is active when: useImageMode == true || imageCacheKeys != null.
+  /// When both useImageMode and imageCacheKeys are set, imageCacheKeys takes precedence
+  /// for cache key computation.
+  bool? useImageMode;
 
   @override
   Future<String> _encode() async {
@@ -261,6 +275,9 @@ class ViewLayer extends Layer {
     if (imageCachePadding != null) {
       properties["imageCachePadding"] = imageCachePadding!;
     }
+    if (useImageMode != null) {
+      properties["useImageMode"] = useImageMode!;
+    }
 
     return json.encode(properties);
   }
@@ -312,6 +329,7 @@ class ViewLayer extends Layer {
       maxVisibleAnnotations: map["maxVisibleAnnotations"] as int?,
       imageCacheKeys: (map["imageCacheKeys"] as List?)?.cast<String>(),
       imageCachePadding: (map["imageCachePadding"] as num?)?.toDouble(),
+      useImageMode: map["useImageMode"] as bool?,
     );
   }
 }
