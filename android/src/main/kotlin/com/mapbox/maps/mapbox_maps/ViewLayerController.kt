@@ -589,7 +589,7 @@ class ViewLayerController(
                     val byteBuffer = java.nio.ByteBuffer.allocateDirect(bitmapCopy.byteCount)
                     bitmapCopy.copyPixelsToBuffer(byteBuffer)
 
-                    val scale = context.resources.displayMetrics.density
+                    val scale = mapView.context.resources.displayMetrics.density
                     val expected = mapboxMap.getStyle()?.addStyleImage(
                         cacheKey,
                         scale,
