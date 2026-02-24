@@ -53,6 +53,7 @@ class ViewLayerController {
     // Image mode: style image tracking
     private var registeredStyleImages: [String: Set<String>] = [:]  // layerId -> set of registered style image IDs
     private var imageModeExpressionSet: Set<String> = []  // layers where iconImage expression has been set
+    private var imageModeFeatureMapping: [String: [String: String]] = [:]  // layerId → (featureId → imageName)
 
     // Promote/demote: tracking promoted features (image-mode → live ViewAnnotation)
     private var promotedFeatures: [String: PromotedFeatureInfo] = [:]  // annotationId -> info
@@ -73,6 +74,20 @@ class ViewLayerController {
     private var pendingCreations: [PendingCreate] = []
     private let maxCreatesPerFrame = 15
     private var isDrainingCreationQueue = false
+
+    // Staggered image-mode rendering
+    private struct PendingImageRender {
+        let config: ViewLayerConfig
+        let cacheKey: String
+        let viewData: [String: Any]
+        let padding: CGFloat
+    }
+    private var pendingImageRenders: [PendingImageRender] = []
+    private var pendingImageResults: [(cacheKey: String, image: UIImage)] = []
+    private var isImageRenderBatchActive = false
+    private let maxImageRendersPerFrame = 5
+    private var activeImageBatchConfig: ViewLayerConfig? = nil
+    private var activeImageBatchSymbolLayerId: String? = nil
 
     // Churn detection
     private var recentlyRemoved: [String: [String: CFTimeInterval]] = [:]  // layerId -> featureId -> remove time
@@ -215,6 +230,15 @@ class ViewLayerController {
             // Clean up all annotations for this layer
             self.removeAllAnnotations(forLayer: layerId)
 
+            // Cancel any in-progress image render batch for this layer
+            if self.activeImageBatchConfig?.id == layerId {
+                self.pendingImageRenders.removeAll()
+                self.pendingImageResults.removeAll()
+                self.isImageRenderBatchActive = false
+                self.activeImageBatchConfig = nil
+                self.activeImageBatchSymbolLayerId = nil
+            }
+
             // Unregister image-mode layer from ViewAnnotationController
             if self.isImageMode(config), let symbolLayerId = config.associatedSymbolLayerId {
                 self.viewAnnotationController.unregisterImageModeLayer(symbolLayerId: symbolLayerId)
@@ -342,15 +366,32 @@ class ViewLayerController {
         return config.useImageMode || config.imageCacheKeys != nil
     }
 
-    /// Returns (dataKeys, expressionKeys) for property-based image cache keys, or nil.
-    /// Only returns non-nil when imageCacheKeys is explicitly provided.
-    /// When useImageMode is true without imageCacheKeys, returns nil — the caller
-    /// should use feature IDs instead.
+    /// Returns (dataKeys, expressionKeys) for property-based image cache keys.
+    /// Only used when imageCacheKeys is explicitly provided.
+    /// When nil, the hash-based match expression path is used instead.
     private func getEffectiveKeys(_ config: ViewLayerConfig) -> (dataKeys: [String], expressionKeys: [String])? {
         if let cacheKeys = config.imageCacheKeys {
             return (cacheKeys, cacheKeys)
         }
         return nil
+    }
+
+    /// Computes a hex hash of the view data dictionary for use as a stable image cache key.
+    /// Sorts keys and normalizes numeric values (whole-number doubles drop ".0").
+    private func computeViewDataHash(_ data: [String: Any]) -> String {
+        var combined = ""
+        for key in data.keys.sorted() {
+            let normalized: String
+            if let num = data[key] as? Double,
+               num.truncatingRemainder(dividingBy: 1) == 0,
+               !num.isInfinite, !num.isNaN {
+                normalized = String(Int64(num))
+            } else {
+                normalized = "\(data[key] ?? "nil")"
+            }
+            combined += "\(key)=\(normalized);"
+        }
+        return String(format: "%lx", abs(combined.hashValue))
     }
 
     private func scheduleUpdate() {
@@ -681,17 +722,23 @@ class ViewLayerController {
         }
     }
 
+    // MARK: - Phase 1: Data extraction (cheap, synchronous)
     private func handleImageModeFeatures(config: ViewLayerConfig, queriedFeatures: [MapboxMaps.QueriedRenderedFeature], cycleId: UInt64) {
         guard let symbolLayerId = config.associatedSymbolLayerId else { return }
         let effectiveKeys = getEffectiveKeys(config)
         let useFeatureIds = effectiveKeys == nil
 
-        let batchStart = CACurrentMediaTime()
+        // If a batch is already active for this layer, cancel it and restart with fresh data
+        if isImageRenderBatchActive && activeImageBatchConfig?.id == config.id {
+            pendingImageRenders.removeAll()
+            pendingImageResults.removeAll()
+            isImageRenderBatchActive = false
+            NSLog("[ViewLayerPerf] IMAGE_BATCH_CANCELLED layer=%@ (superseded by new query)", config.id)
+        }
 
-        // Extract unique cache keys from queried features
         var existingImages = registeredStyleImages[config.id] ?? []
-        var newImagesCount = 0
-        var reRegisteredCount = 0
+        var pendingItems: [PendingImageRender] = []
+        var currentCycleMapping: [String: String] = [:]  // featureId → imageName (for hash-based match expression)
 
         for queriedFeature in queriedFeatures {
             guard queriedFeature.queriedFeature.source == config.sourceId else { continue }
@@ -726,7 +773,9 @@ class ViewLayerController {
             let cacheKey: String
             if useFeatureIds {
                 guard let featureId = getFeatureIdString(feature) else { continue }
-                cacheKey = "\(config.layoutName)_\(featureId)"
+                let hash = computeViewDataHash(viewData)
+                cacheKey = "\(config.layoutName)_\(hash)"
+                currentCycleMapping[featureId] = cacheKey
             } else {
                 cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: effectiveKeys!.dataKeys)
             }
@@ -736,57 +785,190 @@ class ViewLayerController {
                     continue
                 }
                 existingImages.remove(cacheKey)
-                reRegisteredCount += 1
                 NSLog("[ViewLayerDebug] STYLE_IMAGE_STALE cacheKey=%@ — tracked but missing from style, will re-register", cacheKey)
             }
 
-            // Render new variation
-            let padding = CGFloat(config.imageCachePadding ?? 0)
-            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: [], padding: padding, overrideCacheKey: cacheKey) else {
-                NSLog("[ViewLayerPerf] IMAGE_MODE_RENDER_FAIL cacheKey=%@", cacheKey)
-                continue
-            }
+            // Check for duplicates within this batch
+            if pendingItems.contains(where: { $0.cacheKey == cacheKey }) { continue }
 
-            // Register as Mapbox style image
+            let padding = CGFloat(config.imageCachePadding ?? 0)
+            pendingItems.append(PendingImageRender(config: config, cacheKey: cacheKey, viewData: viewData, padding: padding))
+        }
+
+        registeredStyleImages[config.id] = existingImages
+
+        // For hash-based path: update mapping and set match expression every cycle
+        if useFeatureIds {
+            setHashBasedMatchExpression(config: config, symbolLayerId: symbolLayerId, currentCycleMapping: currentCycleMapping)
+        }
+
+        if pendingItems.isEmpty {
+            // No new images needed — set expression and reveal immediately
+            if !useFeatureIds {
+                setIconImageExpressionIfNeeded(config: config, symbolLayerId: symbolLayerId, effectiveKeys: effectiveKeys, useFeatureIds: useFeatureIds)
+            }
+            revealImageModeLayerIfNeeded(config: config, symbolLayerId: symbolLayerId)
+            NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=0 totalImages=%d", config.id, existingImages.count)
+            return
+        }
+
+        // Queue for staggered rendering
+        pendingImageRenders = pendingItems
+        pendingImageResults = []
+        isImageRenderBatchActive = true
+        activeImageBatchConfig = config
+        activeImageBatchSymbolLayerId = symbolLayerId
+        NSLog("[ViewLayerPerf] IMAGE_BATCH_QUEUED layer=%@ count=%d", config.id, pendingItems.count)
+        drainImageRenderQueue()
+    }
+
+    // MARK: - Phase 2: Staggered rendering (main thread, batched across frames)
+    private func drainImageRenderQueue() {
+        guard isImageRenderBatchActive else { return }
+
+        let batch = Array(pendingImageRenders.prefix(maxImageRendersPerFrame))
+        pendingImageRenders.removeFirst(min(maxImageRendersPerFrame, pendingImageRenders.count))
+
+        for pending in batch {
+            if let image = viewAnnotationController.renderViewToImage(layoutName: pending.config.layoutName, data: pending.viewData, cacheKeys: [], padding: pending.padding, overrideCacheKey: pending.cacheKey) {
+                pendingImageResults.append((cacheKey: pending.cacheKey, image: image))
+            } else {
+                NSLog("[ViewLayerPerf] IMAGE_MODE_RENDER_FAIL cacheKey=%@", pending.cacheKey)
+            }
+        }
+
+        if !pendingImageRenders.isEmpty {
+            // More to render — yield to run loop and continue next frame
+            DispatchQueue.main.async { [weak self] in
+                self?.drainImageRenderQueue()
+            }
+        } else {
+            // All renders complete — commit the batch
+            commitImageBatch()
+        }
+    }
+
+    // MARK: - Phase 3: Batch style registration
+    private func commitImageBatch() {
+        guard isImageRenderBatchActive,
+              let config = activeImageBatchConfig,
+              let symbolLayerId = activeImageBatchSymbolLayerId else {
+            return
+        }
+
+        let effectiveKeys = getEffectiveKeys(config)
+        let useFeatureIds = effectiveKeys == nil
+        var existingImages = registeredStyleImages[config.id] ?? []
+        var newImagesCount = 0
+
+        for result in pendingImageResults {
             do {
-                try mapView.mapboxMap.addImage(image, id: cacheKey, sdf: false, stretchX: [], stretchY: [], content: nil)
-                existingImages.insert(cacheKey)
+                try mapView.mapboxMap.addImage(result.image, id: result.cacheKey, sdf: false, stretchX: [], stretchY: [], content: nil)
+                existingImages.insert(result.cacheKey)
                 newImagesCount += 1
-                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTERED cacheKey=%@ size=%.0fx%.0f", cacheKey, image.size.width, image.size.height)
+                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTERED cacheKey=%@ size=%.0fx%.0f", result.cacheKey, result.image.size.width, result.image.size.height)
             } catch {
-                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTER_FAIL cacheKey=%@ error=%@", cacheKey, error.localizedDescription)
+                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTER_FAIL cacheKey=%@ error=%@", result.cacheKey, error.localizedDescription)
             }
         }
 
         registeredStyleImages[config.id] = existingImages
 
-        // Set iconImage expression on the symbol layer (once)
-        if !imageModeExpressionSet.contains(config.id) {
-            let expression: [Any]
-            if let exprKeys = effectiveKeys?.expressionKeys {
-                // Property-based: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
-                var parts: [Any] = ["concat", "\(config.layoutName)_"]
-                for (i, key) in exprKeys.enumerated() {
-                    if i > 0 {
-                        parts.append("_")
-                    }
-                    parts.append(["get", key])
+        if useFeatureIds {
+            // Re-set match expression to force renderer to pick up newly registered images
+            if let layerMapping = imageModeFeatureMapping[config.id] {
+                var matchExpr: [Any] = ["match", ["to-string", ["id"]]]
+                for (fid, imgName) in layerMapping {
+                    matchExpr.append(fid)
+                    matchExpr.append(imgName)
                 }
-                expression = parts
-            } else {
-                // Feature ID-based: ["concat", "layoutName_", ["to-string", ["id"]]]
-                expression = ["concat", "\(config.layoutName)_", ["to-string", ["id"]]]
+                matchExpr.append("")  // fallback
+                try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: matchExpr)
+                NSLog("[ViewLayerPerf] HASH_EXPRESSION_REFRESH layer=%@ mappingCount=%d", config.id, layerMapping.count)
             }
+        } else {
+            setIconImageExpressionIfNeeded(config: config, symbolLayerId: symbolLayerId, effectiveKeys: effectiveKeys, useFeatureIds: useFeatureIds)
+        }
+        revealImageModeLayerIfNeeded(config: config, symbolLayerId: symbolLayerId)
 
-            do {
-                try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: expression)
-                imageModeExpressionSet.insert(config.id)
-                NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_SET layer=%@ symbolLayer=%@ useFeatureIds=%d", config.id, symbolLayerId, useFeatureIds ? 1 : 0)
-            } catch {
-                NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
+        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=%d totalImages=%d", config.id, newImagesCount, existingImages.count)
+
+        // Clear batch state
+        pendingImageResults.removeAll()
+        isImageRenderBatchActive = false
+        activeImageBatchConfig = nil
+        activeImageBatchSymbolLayerId = nil
+    }
+
+    // MARK: - Image mode helpers
+
+    private func setIconImageExpressionIfNeeded(config: ViewLayerConfig, symbolLayerId: String, effectiveKeys: (dataKeys: [String], expressionKeys: [String])?, useFeatureIds: Bool) {
+        guard !imageModeExpressionSet.contains(config.id) else { return }
+
+        let expression: [Any]
+        if let exprKeys = effectiveKeys?.expressionKeys {
+            var parts: [Any] = ["concat", "\(config.layoutName)_"]
+            for (i, key) in exprKeys.enumerated() {
+                if i > 0 {
+                    parts.append("_")
+                }
+                parts.append(["get", key])
             }
+            expression = parts
+        } else {
+            expression = ["concat", "\(config.layoutName)_", ["to-string", ["id"]]]
+        }
 
-            // Set opacity expression for promote/demote (hides icon when feature state "promoted" is true)
+        do {
+            try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: expression)
+            imageModeExpressionSet.insert(config.id)
+            NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_SET layer=%@ symbolLayer=%@ useFeatureIds=%d", config.id, symbolLayerId, useFeatureIds ? 1 : 0)
+        } catch {
+            NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
+        }
+
+        let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
+        do {
+            try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
+            opacityExpressionSet.insert(config.id)
+            NSLog("[ViewLayerPerf] OPACITY_EXPRESSION_SET layer=%@ symbolLayer=%@", config.id, symbolLayerId)
+        } catch {
+            NSLog("[ViewLayerPerf] OPACITY_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
+        }
+    }
+
+    /// Builds and sets a match expression that maps feature IDs to hash-based image names.
+    /// Called every cycle for the hash-based path (when imageCacheKeys is nil).
+    private func setHashBasedMatchExpression(config: ViewLayerConfig, symbolLayerId: String, currentCycleMapping: [String: String]) {
+        // Merge current cycle mapping into persistent mapping
+        var layerMapping = imageModeFeatureMapping[config.id] ?? [:]
+        for (fid, imgName) in currentCycleMapping {
+            layerMapping[fid] = imgName
+        }
+        // Trim if too large — keep only currently visible features
+        if layerMapping.count > 500 {
+            layerMapping = currentCycleMapping
+        }
+        imageModeFeatureMapping[config.id] = layerMapping
+
+        // Build match expression: ["match", ["to-string", ["id"]], "fid1", "img1", ..., ""]
+        var matchExpr: [Any] = ["match", ["to-string", ["id"]]]
+        for (fid, imgName) in layerMapping {
+            matchExpr.append(fid)
+            matchExpr.append(imgName)
+        }
+        matchExpr.append("")  // fallback
+
+        do {
+            try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: matchExpr)
+            imageModeExpressionSet.insert(config.id)
+            NSLog("[ViewLayerPerf] HASH_EXPRESSION layer=%@ symbolLayer=%@ mappingCount=%d", config.id, symbolLayerId, layerMapping.count)
+        } catch {
+            NSLog("[ViewLayerPerf] HASH_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
+        }
+
+        // Set opacity expression for promote/demote (only once)
+        if !opacityExpressionSet.contains(config.id) {
             let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
             do {
                 try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
@@ -796,30 +978,23 @@ class ViewLayerController {
                 NSLog("[ViewLayerPerf] OPACITY_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
             }
         }
+    }
 
-        // Reveal symbol layer after first image batch completes
-        if !imageModeInitialBatchDone.contains(config.id) {
-            imageModeInitialBatchDone.insert(config.id)
+    private func revealImageModeLayerIfNeeded(config: ViewLayerConfig, symbolLayerId: String) {
+        guard !imageModeInitialBatchDone.contains(config.id) else { return }
+        imageModeInitialBatchDone.insert(config.id)
 
-            // Set transitions for smooth ~200ms fade-in
-            let transition: [String: Any] = ["duration": 200, "delay": 0]
-            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity-transition", value: transition)
-            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity-transition", value: transition)
+        let transition: [String: Any] = ["duration": 200, "delay": 0]
+        try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity-transition", value: transition)
+        try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity-transition", value: transition)
 
-            // Restore icon-opacity to promote/demote expression
-            let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
-            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
-            opacityExpressionSet.insert(config.id)
+        let opacityExpr: [Any] = ["case", ["boolean", ["feature-state", "promoted"], false], 0, 1]
+        try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-opacity", value: opacityExpr)
+        opacityExpressionSet.insert(config.id)
 
-            // Restore text-opacity
-            try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity", value: 1)
+        try? mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "text-opacity", value: 1)
 
-            NSLog("[ViewLayerPerf] IMAGE_MODE_REVEALED layer=%@ symbolLayer=%@", config.id, symbolLayerId)
-        }
-
-        let batchMs = (CACurrentMediaTime() - batchStart) * 1000
-        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ batchMs=%.1f newImages=%d reRegistered=%d totalImages=%d",
-              config.id, batchMs, newImagesCount, reRegisteredCount, existingImages.count)
+        NSLog("[ViewLayerPerf] IMAGE_MODE_REVEALED layer=%@ symbolLayer=%@", config.id, symbolLayerId)
     }
 
     // MARK: - Staggered batch creation
@@ -1161,6 +1336,9 @@ class ViewLayerController {
             }
             registeredStyleImages.removeValue(forKey: layerId)
         }
+
+        // Clean up feature-to-image mapping
+        imageModeFeatureMapping.removeValue(forKey: layerId)
 
         // Reset iconImage expression if it was set
         if imageModeExpressionSet.contains(layerId) {

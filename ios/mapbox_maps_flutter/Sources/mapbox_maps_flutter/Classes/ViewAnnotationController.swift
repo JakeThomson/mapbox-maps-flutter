@@ -123,6 +123,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         let options = ViewAnnotationOptions(
             geometry: Point(coordinate),
             allowOverlap: allowOverlap,
+            allowOverlapWithPuck: true,
             anchor: parseAnchor(anchor)
         )
 
@@ -219,6 +220,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
 
         annotation.variableAnchors = [ViewAnnotationAnchorConfig(anchor: parseAnchor(anchor))]
         annotation.allowOverlap = allowOverlap
+        annotation.allowOverlapWithPuck = true
 
         annotation.onVisibilityChanged = { [weak self] isVisible in
             self?.visibilityObjects[id]?.isVisible = isVisible

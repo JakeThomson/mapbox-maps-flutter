@@ -197,6 +197,7 @@ class ViewAnnotationController(
                     val options = viewAnnotationOptions {
                         geometry(Point.fromLngLat(longitude, latitude))
                         allowOverlap(allowOverlap)
+                        allowOverlapWithPuck(true)
                         annotationAnchor {
                             anchor(parseAnchor(anchor))
                         }
@@ -438,6 +439,7 @@ class ViewAnnotationController(
                             featureId(featureId)
                         }
                         allowOverlap(allowOverlap)
+                        allowOverlapWithPuck(true)
                         annotationAnchor {
                             anchor(parseAnchor(anchor))
                         }
