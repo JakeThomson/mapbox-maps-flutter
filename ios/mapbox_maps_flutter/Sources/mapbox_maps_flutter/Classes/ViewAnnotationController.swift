@@ -776,7 +776,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         // Phase 2: Check image-mode symbol layers via queryRenderedFeatures
         guard !imageModeLayerConfigs.isEmpty else { return }
 
-        let tapRect = CGRect(x: tapPoint.x - 22, y: tapPoint.y - 22, width: 44, height: 44)
+        let tapRect = CGRect(x: tapPoint.x - 5, y: tapPoint.y - 5, width: 10, height: 10)
         let layerIds = Array(imageModeLayerConfigs.keys)
 
         let options = MapboxMaps.RenderedQueryOptions(layerIds: layerIds, filter: nil)
