@@ -123,7 +123,6 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         let options = ViewAnnotationOptions(
             geometry: Point(coordinate),
             allowOverlap: allowOverlap,
-            allowOverlapWithPuck: true,
             anchor: parseAnchor(anchor)
         )
 
