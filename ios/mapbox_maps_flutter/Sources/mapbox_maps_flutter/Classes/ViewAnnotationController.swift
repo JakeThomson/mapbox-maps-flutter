@@ -69,11 +69,6 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
             let pointInView = view.convert(tapPoint, from: mapView)
             if view.bounds.contains(pointInView) { return true }
         }
-        // Also check image-mode layers — let the gesture begin so handleMapTap
-        // can query rendered features; the SDK tap gestures will be suppressed.
-        if !imageModeLayerConfigs.isEmpty {
-            return true
-        }
         return false  // No annotation hit → fail immediately, SDK gestures proceed
     }
 
@@ -776,7 +771,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         // Phase 2: Check image-mode symbol layers via queryRenderedFeatures
         guard !imageModeLayerConfigs.isEmpty else { return }
 
-        let tapRect = CGRect(x: tapPoint.x - 5, y: tapPoint.y - 5, width: 10, height: 10)
+        let tapRect = CGRect(x: tapPoint.x - 22, y: tapPoint.y - 22, width: 44, height: 44)
         let layerIds = Array(imageModeLayerConfigs.keys)
 
         let options = MapboxMaps.RenderedQueryOptions(layerIds: layerIds, filter: nil)
@@ -834,24 +829,6 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
                         self.imageModeFeatureData.removeAll()
                     }
                     self.imageModeFeatureData[annotationId] = viewData
-
-                    let featuresetFeature = FeaturesetFeature(
-                        id: featureId != nil ? FeaturesetFeatureId(id: featureId!, namespace: nil) : nil,
-                        featureset: FeaturesetDescriptor(featuresetId: nil, importId: nil, layerId: config.viewLayerId),
-                        geometry: feature.geometry?.toMap() ?? [:],
-                        properties: feature.properties?.turfRawValue ?? [:],
-                        state: [:]
-                    )
-
-                    let idList: [Any?]? = featuresetFeature.id != nil ? [featuresetFeature.id!.id, featuresetFeature.id!.namespace] : nil
-                    let featuresetList: [Any?] = [featuresetFeature.featureset.featuresetId, featuresetFeature.featureset.importId, featuresetFeature.featureset.layerId]
-                    let featureList: [Any?] = [idList, featuresetList, featuresetFeature.geometry, featuresetFeature.properties, featuresetFeature.state]
-
-                    self.tapEventChannel.invokeMethod("onTap", arguments: [
-                        "annotationId": annotationId,
-                        "feature": featureList as Any,
-                        "data": viewData
-                    ])
                     return
                 }
             case .failure(let error):

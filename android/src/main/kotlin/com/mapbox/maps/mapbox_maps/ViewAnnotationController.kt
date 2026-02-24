@@ -573,8 +573,8 @@ class ViewAnnotationController(
         val tapY = (rawY - mapLocation[1]).toDouble()
 
         val screenBox = com.mapbox.maps.ScreenBox(
-            com.mapbox.maps.ScreenCoordinate(tapX - 5.0, tapY - 5.0),
-            com.mapbox.maps.ScreenCoordinate(tapX + 5.0, tapY + 5.0)
+            com.mapbox.maps.ScreenCoordinate(tapX - 22.0, tapY - 22.0),
+            com.mapbox.maps.ScreenCoordinate(tapX + 22.0, tapY + 22.0)
         )
 
         val layerIds = imageModeLayerConfigs.keys.toList()
@@ -620,24 +620,6 @@ class ViewAnnotationController(
                     imageModeFeatureData.clear()
                 }
                 imageModeFeatureData[annotationId] = viewData
-
-                val featuresetFeature = FeaturesetFeature(
-                    id = FeaturesetFeatureId(featureId, null),
-                    featureset = FeaturesetDescriptor(null, null, config.viewLayerId),
-                    geometry = feature.geometry()?.toMap() ?: emptyMap(),
-                    properties = feature.properties()?.let { props ->
-                        org.json.JSONObject(props.toString()).toFilteredMap()
-                    } ?: emptyMap(),
-                    state = emptyMap()
-                )
-
-                mainHandler.post {
-                    tapEventChannel.invokeMethod("onTap", mapOf(
-                        "annotationId" to annotationId,
-                        "feature" to serializeFeature(featuresetFeature),
-                        "data" to viewData
-                    ))
-                }
                 return@queryRenderedFeatures
             }
         }
