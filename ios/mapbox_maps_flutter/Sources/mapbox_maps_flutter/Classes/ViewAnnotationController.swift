@@ -576,20 +576,32 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     }
 
     /// Computes a cache key from layoutName and the values of the specified data keys.
+    /// Numeric values are normalized to match Mapbox expression `concat` stringification
+    /// (ECMAScript Number.toString): whole-number doubles omit the ".0" suffix.
     func computeImageCacheKey(layoutName: String, data: [String: Any]?, keys: [String]) -> String {
         var parts = [layoutName]
         for key in keys {
             let value = data?[key]
-            parts.append("\(value ?? "nil")")
+            parts.append(normalizeValueForCacheKey(value))
         }
         return parts.joined(separator: "_")
+    }
+
+    private func normalizeValueForCacheKey(_ value: Any?) -> String {
+        guard let value = value else { return "nil" }
+        if let num = value as? Double,
+           num.truncatingRemainder(dividingBy: 1) == 0,
+           !num.isInfinite, !num.isNaN {
+            return String(Int64(num))
+        }
+        return "\(value)"
     }
 
     /// Renders a native view to a UIImage for use as a Mapbox style image.
     /// Creates view via factory, renders to image, caches it, and returns the UIImage.
     /// Does NOT create any ViewAnnotation.
-    func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String], padding: CGFloat = 0) -> UIImage? {
-        let cacheKey = computeImageCacheKey(layoutName: layoutName, data: data, keys: cacheKeys)
+    func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String], padding: CGFloat = 0, overrideCacheKey: String? = nil) -> UIImage? {
+        let cacheKey = overrideCacheKey ?? computeImageCacheKey(layoutName: layoutName, data: data, keys: cacheKeys)
 
         if let cachedImage = imageCache[cacheKey] {
             return cachedImage

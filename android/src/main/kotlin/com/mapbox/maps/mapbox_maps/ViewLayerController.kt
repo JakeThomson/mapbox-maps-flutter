@@ -291,28 +291,16 @@ class ViewLayerController(
         config.useImageMode || config.imageCacheKeys != null
 
     /**
-     * Returns (dataKeys, expressionKeys) for image mode, or null if not image mode.
-     * - dataKeys: used in computeImageCacheKey to look up values in viewData
-     * - expressionKeys: used in ["get", key] for the icon-image expression
-     * When imageCacheKeys is explicitly provided, both lists are the same.
-     * When auto-derived, dataKeys come from propertyMapping keys and expressionKeys
-     * come from the FeatureProperty propertyKey values.
+     * Returns (dataKeys, expressionKeys) for property-based image cache keys, or null.
+     * Only returns non-null when imageCacheKeys is explicitly provided.
+     * When useImageMode is true without imageCacheKeys, returns null — the caller
+     * should use feature IDs instead.
      */
     private fun getEffectiveKeys(config: ViewLayerConfig): Pair<List<String>, List<String>>? {
         if (config.imageCacheKeys != null) {
             return config.imageCacheKeys to config.imageCacheKeys
         }
-        if (!config.useImageMode) return null
-        val dataKeys = mutableListOf<String>()
-        val exprKeys = mutableListOf<String>()
-        for ((dataKey, mapping) in config.propertyMapping) {
-            if (mapping.type == "feature" && mapping.propertyKey != null) {
-                dataKeys.add(dataKey)
-                exprKeys.add(mapping.propertyKey)
-            }
-        }
-        Log.d(TAG, "getEffectiveKeys AUTO_DERIVED | layer=${config.id} dataKeys=$dataKeys exprKeys=$exprKeys")
-        return dataKeys to exprKeys
+        return null
     }
 
     private fun scheduleUpdate() {
@@ -543,13 +531,13 @@ class ViewLayerController(
     // region Image mode (style image rendering)
 
     private fun handleImageModeFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
-        val (dataKeys, exprKeys) = getEffectiveKeys(config) ?: return
         val symbolLayerId = config.associatedSymbolLayerId ?: return
+        val effectiveKeys = getEffectiveKeys(config)
+        val useFeatureIds = effectiveKeys == null
 
         val batchStart = SystemClock.elapsedRealtime()
 
         val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
-        // Verify a sample image actually exists in the Mapbox style (not just our tracking set)
         val style = mapboxMap.getStyle()
         val sampleKey = existingImages.firstOrNull()
         val sampleExistsInStyle = if (sampleKey != null && style != null) {
@@ -558,7 +546,7 @@ class ViewLayerController(
         val iconImageProp = style?.getStyleLayerProperty(symbolLayerId, "icon-image")
         val iconOpacityProp = style?.getStyleLayerProperty(symbolLayerId, "icon-opacity")
         val layerVisibility = style?.getStyleLayerProperty(symbolLayerId, "visibility")
-        Log.d(TAG, "handleImageMode START | layer=${config.id} existingImagesCount=${existingImages.size} queriedFeatures=${queriedRenderedFeatures.size} sampleKey=$sampleKey existsInStyle=$sampleExistsInStyle iconImage=${iconImageProp?.value} iconOpacity=${iconOpacityProp?.value} visibility=${layerVisibility?.value}")
+        Log.d(TAG, "handleImageMode START | layer=${config.id} useFeatureIds=$useFeatureIds existingImagesCount=${existingImages.size} queriedFeatures=${queriedRenderedFeatures.size} sampleKey=$sampleKey existsInStyle=$sampleExistsInStyle iconImage=${iconImageProp?.value} iconOpacity=${iconOpacityProp?.value} visibility=${layerVisibility?.value}")
         val featuresToRender = mutableListOf<Pair<String, Map<String, Any?>>>()
 
         for (queriedRendered in queriedRenderedFeatures) {
@@ -582,12 +570,18 @@ class ViewLayerController(
                 }
             }
 
-            val cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, dataKeys)
+            val cacheKey: String
+            if (useFeatureIds) {
+                val featureId = feature.id() ?: continue
+                cacheKey = "${config.layoutName}_$featureId"
+            } else {
+                cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, effectiveKeys!!.first)
+            }
             if (existingImages.contains(cacheKey)) continue
             if (featuresToRender.any { it.first == cacheKey }) continue
 
             if (featuresToRender.isEmpty()) {
-                Log.d(TAG, "handleImageMode FIRST_CACHE_KEY | layer=${config.id} cacheKey=$cacheKey dataKeys=$dataKeys viewData=$viewData")
+                Log.d(TAG, "handleImageMode FIRST_CACHE_KEY | layer=${config.id} cacheKey=$cacheKey useFeatureIds=$useFeatureIds viewData=$viewData")
             }
             featuresToRender.add(cacheKey to viewData)
         }
@@ -599,7 +593,7 @@ class ViewLayerController(
 
         if (totalToRender == 0) {
             // No new images needed, just ensure expression is set
-            setIconImageExpression(config, symbolLayerId, exprKeys)
+            setIconImageExpression(config, symbolLayerId, if (useFeatureIds) null else effectiveKeys?.second)
             revealImageModeLayerIfNeeded(config, symbolLayerId)
             val batchMs = SystemClock.elapsedRealtime() - batchStart
             Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=0 totalImages=${existingImages.size}")
@@ -610,7 +604,7 @@ class ViewLayerController(
 
         val padding = (config.imageCachePadding ?: 0.0).toFloat()
         for ((cacheKey, viewData) in featuresToRender) {
-            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, dataKeys, padding) { bitmap ->
+            viewAnnotationController.renderViewToBitmap(config.layoutName, viewData, emptyList(), padding, overrideCacheKey = cacheKey) { bitmap ->
                 if (bitmap != null) {
                     // Convert Bitmap to Mapbox style image
                     val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -639,12 +633,10 @@ class ViewLayerController(
 
                 completedCount++
                 if (completedCount == totalToRender) {
-                    setIconImageExpression(config, symbolLayerId, exprKeys)
+                    setIconImageExpression(config, symbolLayerId, if (useFeatureIds) null else effectiveKeys?.second)
                     revealImageModeLayerIfNeeded(config, symbolLayerId)
 
                     // Force renderer to re-evaluate icon-image expression after new images are registered.
-                    // On Android, images are registered asynchronously (after tile rendering), so the renderer
-                    // may have cached "image not found" results. Re-setting the expression invalidates this cache.
                     if (successCount > 0) {
                         mapboxMap.getStyle()?.let { style ->
                             val currentExpr = style.getStyleLayerProperty(symbolLayerId, "icon-image")
@@ -660,21 +652,32 @@ class ViewLayerController(
         }
     }
 
-    private fun setIconImageExpression(config: ViewLayerConfig, symbolLayerId: String, expressionKeys: List<String>) {
+    /**
+     * Sets the icon-image expression on the symbol layer.
+     * @param expressionKeys When non-null, builds property-based expression using ["get", key].
+     *                       When null, builds feature-ID-based expression using ["to-string", ["id"]].
+     */
+    private fun setIconImageExpression(config: ViewLayerConfig, symbolLayerId: String, expressionKeys: List<String>?) {
         if (imageModeExpressionSet.contains(config.id)) return
 
-        // Build expression JSON: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
-        val parts = mutableListOf<Any>()
-        parts.add("concat")
-        parts.add("${config.layoutName}_")
-        for ((i, key) in expressionKeys.withIndex()) {
-            if (i > 0) {
-                parts.add("_")
+        val expressionJson: String
+        if (expressionKeys != null) {
+            // Property-based: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
+            val parts = mutableListOf<Any>()
+            parts.add("concat")
+            parts.add("${config.layoutName}_")
+            for ((i, key) in expressionKeys.withIndex()) {
+                if (i > 0) {
+                    parts.add("_")
+                }
+                parts.add(listOf("get", key))
             }
-            parts.add(listOf("get", key))
+            expressionJson = org.json.JSONArray(parts).toString()
+        } else {
+            // Feature ID-based: ["concat", "layoutName_", ["to-string", ["id"]]]
+            expressionJson = """["concat","${config.layoutName}_",["to-string",["id"]]]"""
         }
 
-        val expressionJson = org.json.JSONArray(parts).toString()
         val expressionValue = com.mapbox.bindgen.Value.fromJson(expressionJson)
 
         if (expressionValue.isError) {

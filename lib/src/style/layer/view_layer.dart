@@ -191,10 +191,12 @@ class ViewLayer extends Layer {
   /// Enables image mode rendering without explicit cache keys.
   ///
   /// When true, annotation views are rendered to static images (like imageCacheKeys)
-  /// but cache keys are auto-derived from all FeatureProperty entries in propertyMapping.
-  /// This is useful for cluster layers where every feature is unique and cache
-  /// deduplication provides no benefit, but the performance win of static images
-  /// over live views is still desirable.
+  /// but each feature's GeoJSON ID is used as the cache key. This means every feature
+  /// gets its own rendered image (no deduplication), but the performance win of static
+  /// images over live views is still achieved.
+  ///
+  /// **Requires** features to have GeoJSON-level IDs (i.e., a top-level `"id"` field
+  /// in the Feature object, not just `properties.id`).
   ///
   /// Image mode is active when: useImageMode == true || imageCacheKeys != null.
   /// When both useImageMode and imageCacheKeys are set, imageCacheKeys takes precedence

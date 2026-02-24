@@ -304,26 +304,15 @@ class ViewLayerController {
         return config.useImageMode || config.imageCacheKeys != nil
     }
 
-    /// Returns (dataKeys, expressionKeys) for image mode, or nil if not image mode.
-    /// - dataKeys: used in computeImageCacheKey to look up values in viewData
-    /// - expressionKeys: used in ["get", key] for the icon-image expression
-    /// When imageCacheKeys is explicitly provided, both lists are the same.
-    /// When auto-derived, dataKeys come from propertyMapping keys and expressionKeys
-    /// come from the FeatureProperty propertyKey values.
+    /// Returns (dataKeys, expressionKeys) for property-based image cache keys, or nil.
+    /// Only returns non-nil when imageCacheKeys is explicitly provided.
+    /// When useImageMode is true without imageCacheKeys, returns nil — the caller
+    /// should use feature IDs instead.
     private func getEffectiveKeys(_ config: ViewLayerConfig) -> (dataKeys: [String], expressionKeys: [String])? {
         if let cacheKeys = config.imageCacheKeys {
             return (cacheKeys, cacheKeys)
         }
-        guard config.useImageMode else { return nil }
-        var dataKeys: [String] = []
-        var exprKeys: [String] = []
-        for (dataKey, mapping) in config.propertyMapping {
-            if mapping.type == "feature", let propertyKey = mapping.propertyKey {
-                dataKeys.append(dataKey)
-                exprKeys.append(propertyKey)
-            }
-        }
-        return (dataKeys, exprKeys)
+        return nil
     }
 
     private func scheduleUpdate() {
@@ -636,11 +625,28 @@ class ViewLayerController {
 
     // MARK: - Image mode (style image rendering)
 
+    /// Extracts the raw GeoJSON feature ID as a string, matching the behavior of
+    /// the Mapbox expression ["to-string", ["id"]]. Only uses feature.identifier,
+    /// NOT properties["id"], since the expression ["id"] only accesses the GeoJSON-level ID.
+    private func getFeatureIdString(_ feature: Feature) -> String? {
+        guard let id = feature.identifier else { return nil }
+        switch id {
+        case .string(let str):
+            return str
+        case .number(let num):
+            if num.truncatingRemainder(dividingBy: 1) == 0 {
+                return String(Int64(num))
+            }
+            return String(num)
+        @unknown default:
+            return nil
+        }
+    }
+
     private func handleImageModeFeatures(config: ViewLayerConfig, queriedFeatures: [MapboxMaps.QueriedRenderedFeature], cycleId: UInt64) {
-        guard let keys = getEffectiveKeys(config),
-              let symbolLayerId = config.associatedSymbolLayerId else { return }
-        let dataKeys = keys.dataKeys
-        let exprKeys = keys.expressionKeys
+        guard let symbolLayerId = config.associatedSymbolLayerId else { return }
+        let effectiveKeys = getEffectiveKeys(config)
+        let useFeatureIds = effectiveKeys == nil
 
         let batchStart = CACurrentMediaTime()
 
@@ -657,7 +663,7 @@ class ViewLayerController {
 
             let feature = queriedFeature.queriedFeature.feature
 
-            // Build data from property mapping (only the cache key properties matter)
+            // Build data from property mapping
             var viewData: [String: Any] = [:]
             for (dataKey, mapping) in config.propertyMapping {
                 switch mapping.type {
@@ -679,7 +685,13 @@ class ViewLayerController {
                 }
             }
 
-            let cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: dataKeys)
+            let cacheKey: String
+            if useFeatureIds {
+                guard let featureId = getFeatureIdString(feature) else { continue }
+                cacheKey = "\(config.layoutName)_\(featureId)"
+            } else {
+                cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: effectiveKeys!.dataKeys)
+            }
 
             if existingImages.contains(cacheKey) {
                 if mapView.mapboxMap.imageExists(withId: cacheKey) {
@@ -692,7 +704,7 @@ class ViewLayerController {
 
             // Render new variation
             let padding = CGFloat(config.imageCachePadding ?? 0)
-            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: dataKeys, padding: padding) else {
+            guard let image = viewAnnotationController.renderViewToImage(layoutName: config.layoutName, data: viewData, cacheKeys: [], padding: padding, overrideCacheKey: cacheKey) else {
                 NSLog("[ViewLayerPerf] IMAGE_MODE_RENDER_FAIL cacheKey=%@", cacheKey)
                 continue
             }
@@ -712,19 +724,26 @@ class ViewLayerController {
 
         // Set iconImage expression on the symbol layer (once)
         if !imageModeExpressionSet.contains(config.id) {
-            // Build expression: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
-            var expression: [Any] = ["concat", "\(config.layoutName)_"]
-            for (i, key) in exprKeys.enumerated() {
-                if i > 0 {
-                    expression.append("_")
+            let expression: [Any]
+            if let exprKeys = effectiveKeys?.expressionKeys {
+                // Property-based: ["concat", "layoutName_", ["get", "key1"], "_", ["get", "key2"], ...]
+                var parts: [Any] = ["concat", "\(config.layoutName)_"]
+                for (i, key) in exprKeys.enumerated() {
+                    if i > 0 {
+                        parts.append("_")
+                    }
+                    parts.append(["get", key])
                 }
-                expression.append(["get", key])
+                expression = parts
+            } else {
+                // Feature ID-based: ["concat", "layoutName_", ["to-string", ["id"]]]
+                expression = ["concat", "\(config.layoutName)_", ["to-string", ["id"]]]
             }
 
             do {
                 try mapView.mapboxMap.setLayerProperty(for: symbolLayerId, property: "icon-image", value: expression)
                 imageModeExpressionSet.insert(config.id)
-                NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_SET layer=%@ symbolLayer=%@", config.id, symbolLayerId)
+                NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_SET layer=%@ symbolLayer=%@ useFeatureIds=%d", config.id, symbolLayerId, useFeatureIds ? 1 : 0)
             } catch {
                 NSLog("[ViewLayerPerf] ICON_IMAGE_EXPRESSION_FAIL layer=%@ error=%@", config.id, error.localizedDescription)
             }

@@ -211,19 +211,31 @@ class ViewAnnotationController(
     }
 
     /// Computes a cache key from layoutName and the values of the specified data keys.
+    /// Numeric values are normalized to match Mapbox expression `concat` stringification
+    /// (ECMAScript Number.toString): whole-number doubles omit the ".0" suffix.
     fun computeImageCacheKey(layoutName: String, data: Map<String, Any?>?, keys: List<String>): String {
         val parts = mutableListOf(layoutName)
         for (key in keys) {
-            parts.add("${data?.get(key) ?: "nil"}")
+            parts.add(normalizeValueForCacheKey(data?.get(key)))
         }
         return parts.joinToString("_")
+    }
+
+    private fun normalizeValueForCacheKey(value: Any?): String {
+        if (value == null) return "nil"
+        val str = value.toString()
+        val d = str.toDoubleOrNull()
+        if (d != null && d == Math.floor(d) && !d.isInfinite()) {
+            return d.toLong().toString()
+        }
+        return str
     }
 
     /// Renders a native view to a Bitmap for use as a Mapbox style image.
     /// Creates ComposeView, composes, renders to Bitmap, caches it, returns via callback.
     /// Does NOT create any ViewAnnotation.
-    fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, padding: Float = 0f, callback: (Bitmap?) -> Unit) {
-        val cacheKey = computeImageCacheKey(layoutName, data, cacheKeys)
+    fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, padding: Float = 0f, overrideCacheKey: String? = null, callback: (Bitmap?) -> Unit) {
+        val cacheKey = overrideCacheKey ?: computeImageCacheKey(layoutName, data, cacheKeys)
 
         val cachedBitmap = imageCache[cacheKey]
         if (cachedBitmap != null) {
