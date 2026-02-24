@@ -227,6 +227,45 @@ class ViewLayerController(
                 )))
             }
         }
+
+        val removeChannel = BasicMessageChannel<Any?>(
+            messenger,
+            "dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.removeViewLayer.$channelSuffix",
+            StandardMessageCodec()
+        )
+
+        removeChannel.setMessageHandler { message, reply ->
+            try {
+                val args = message as? List<*>
+                val layerId = args?.get(0) as? String
+                    ?: throw Exception("Missing layerId argument")
+
+                val config = viewLayers[layerId]
+                    ?: throw Exception("ViewLayer '$layerId' not found")
+
+                // Clean up all annotations for this layer
+                removeAllAnnotationsForLayer(layerId)
+
+                // Unregister image-mode layer from ViewAnnotationController
+                if (config.associatedSymbolLayerId != null && isImageMode(config)) {
+                    viewAnnotationController.unregisterImageModeLayer(config.associatedSymbolLayerId)
+                }
+
+                // Remove the layer config
+                viewLayers.remove(layerId)
+                featureAnnotations.remove(layerId)
+                visibleFeatureIds.remove(layerId)
+                hiddenTimestamps.remove(layerId)
+                hiddenAnnotations.remove(layerId)
+
+                reply.reply(emptyMap<String, Any>())
+            } catch (e: Exception) {
+                reply.reply(mapOf("error" to mapOf(
+                    "code" to "view_layer_error",
+                    "message" to e.message
+                )))
+            }
+        }
     }
 
     private fun parseViewLayerConfig(json: String): ViewLayerConfig {

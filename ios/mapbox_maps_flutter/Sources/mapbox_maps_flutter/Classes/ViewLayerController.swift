@@ -191,6 +191,44 @@ class ViewLayerController {
                 reply(["error": ["code": "view_layer_error", "message": error.localizedDescription]])
             }
         }
+
+        let removeChannel = FlutterBasicMessageChannel(
+            name: "dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.removeViewLayer.\(channelSuffix)",
+            binaryMessenger: messenger,
+            codec: FlutterStandardMessageCodec.sharedInstance()
+        )
+
+        removeChannel.setMessageHandler { [weak self] (message, reply) in
+            guard let self = self else { return }
+
+            guard let args = message as? [Any],
+                  let layerId = args.first as? String else {
+                reply(["error": ["code": "invalid_argument", "message": "Missing layerId argument"]])
+                return
+            }
+
+            guard let config = self.viewLayers[layerId] else {
+                reply(["error": ["code": "not_found", "message": "ViewLayer '\(layerId)' not found"]])
+                return
+            }
+
+            // Clean up all annotations for this layer
+            self.removeAllAnnotations(forLayer: layerId)
+
+            // Unregister image-mode layer from ViewAnnotationController
+            if self.isImageMode(config), let symbolLayerId = config.associatedSymbolLayerId {
+                self.viewAnnotationController.unregisterImageModeLayer(symbolLayerId: symbolLayerId)
+            }
+
+            // Remove the layer config
+            self.viewLayers.removeValue(forKey: layerId)
+            self.featureAnnotations.removeValue(forKey: layerId)
+            self.visibleFeatureIds.removeValue(forKey: layerId)
+            self.hiddenTimestamps.removeValue(forKey: layerId)
+            self.hiddenAnnotations.removeValue(forKey: layerId)
+
+            reply([:])
+        }
     }
 
     private func setupCameraObserver() {

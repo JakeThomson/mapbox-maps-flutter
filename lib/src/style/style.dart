@@ -329,6 +329,52 @@ extension StyleLayer on StyleManager {
     }
   }
 
+  /// Remove a layer from the current style.
+  ///
+  /// This handles both regular style layers and ViewLayers. For ViewLayers,
+  /// it cleans up the native view annotation state before removing the style layer.
+  Future<void> removeLayer(String layerId) async {
+    // Try to remove as a ViewLayer first (no-op if it doesn't exist as one)
+    try {
+      await _removeViewLayer(layerId);
+    } catch (_) {
+      // Not a ViewLayer, or already removed — continue to removeStyleLayer
+    }
+
+    // Also try to remove as a regular style layer
+    try {
+      await removeStyleLayer(layerId);
+    } catch (_) {
+      // May not exist as a style layer (e.g. pure ViewLayer)
+    }
+  }
+
+  /// Removes a ViewLayer and all its associated view annotations
+  Future<void> _removeViewLayer(String layerId) async {
+    final channel = BasicMessageChannel<Object?>(
+      'dev.flutter.pigeon.mapbox_maps_flutter.ViewLayerManager.removeViewLayer$pigeonVar_messageChannelSuffix',
+      const StandardMessageCodec(),
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+
+    final Map<Object?, Object?>? replyMap =
+        await channel.send(<Object?>[layerId]) as Map<Object?, Object?>?;
+    if (replyMap == null) {
+      throw PlatformException(
+        code: 'channel-error',
+        message: 'Unable to establish connection on channel.',
+      );
+    } else if (replyMap['error'] != null) {
+      final Map<Object?, Object?> error =
+          (replyMap['error'] as Map<Object?, Object?>?)!;
+      throw PlatformException(
+        code: (error['code'] as String?)!,
+        message: error['message'] as String?,
+        details: error['details'],
+      );
+    }
+  }
+
   /// Get a previously added layer from the current style.
   Future<Layer?> getLayer(String layerId) async {
     var properties = await getStyleLayerProperties(layerId);
