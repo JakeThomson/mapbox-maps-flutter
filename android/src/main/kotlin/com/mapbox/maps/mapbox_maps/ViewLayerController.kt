@@ -145,6 +145,7 @@ class ViewLayerController(
                     ?: throw Exception("Missing properties argument")
 
                 val config = parseViewLayerConfig(propertiesJson)
+                Log.d(TAG, "addViewLayer PARSED | id=${config.id} useImageMode=${config.useImageMode} imageCacheKeys=${config.imageCacheKeys} isImageMode=${isImageMode(config)}")
                 viewLayers[config.id] = config
                 featureAnnotations[config.id] = mutableSetOf()
                 visibleFeatureIds[config.id] = mutableSetOf()
@@ -174,10 +175,14 @@ class ViewLayerController(
                         parts.add(listOf("get", key))
                     }
                     val expressionJson = org.json.JSONArray(parts).toString()
+                    Log.d(TAG, "addViewLayer ICON_IMAGE_EXPR | layer=${config.id} expression=$expressionJson")
                     val expressionValue = com.mapbox.bindgen.Value.fromJson(expressionJson)
                     if (!expressionValue.isError) {
-                        style?.setStyleLayerProperty(config.associatedSymbolLayerId, "icon-image", expressionValue.value!!)
+                        val setResult = style?.setStyleLayerProperty(config.associatedSymbolLayerId, "icon-image", expressionValue.value!!)
+                        Log.d(TAG, "addViewLayer ICON_IMAGE_SET | layer=${config.id} symbolLayer=${config.associatedSymbolLayerId} error=${setResult?.isError} errorMsg=${setResult?.error}")
                         imageModeExpressionSet.add(config.id)
+                    } else {
+                        Log.w(TAG, "addViewLayer ICON_IMAGE_PARSE_FAIL | layer=${config.id} error=${expressionValue.error}")
                     }
 
                     needsImmediateUpdate = true
@@ -226,6 +231,8 @@ class ViewLayerController(
 
     private fun parseViewLayerConfig(json: String): ViewLayerConfig {
         val obj = JSONObject(json)
+        Log.d(TAG, "parseViewLayerConfig RAW_JSON: $json")
+        Log.d(TAG, "parseViewLayerConfig useImageMode_RAW: has=${obj.has("useImageMode")} rawValue=${obj.opt("useImageMode")} rawType=${obj.opt("useImageMode")?.javaClass?.simpleName} optBoolean=${obj.optBoolean("useImageMode", false)}")
 
         val propertyMappingJson = obj.optJSONObject("propertyMapping") ?: JSONObject()
         val propertyMapping = mutableMapOf<String, PropertyMappingConfig>()
@@ -304,6 +311,7 @@ class ViewLayerController(
                 exprKeys.add(mapping.propertyKey)
             }
         }
+        Log.d(TAG, "getEffectiveKeys AUTO_DERIVED | layer=${config.id} dataKeys=$dataKeys exprKeys=$exprKeys")
         return dataKeys to exprKeys
     }
 
@@ -338,10 +346,12 @@ class ViewLayerController(
         viewLayers.values.forEach { config ->
             // Check zoom level
             if (config.minZoom != null && currentZoom < config.minZoom) {
+                Log.d(TAG, "ViewLayerController: ZOOM_OUT_OF_RANGE | layer=${config.id} zoom=$currentZoom < minZoom=${config.minZoom}")
                 removeAllAnnotationsForLayer(config.id)
                 return@forEach
             }
             if (config.maxZoom != null && currentZoom >= config.maxZoom) {
+                Log.d(TAG, "ViewLayerController: ZOOM_OUT_OF_RANGE | layer=${config.id} zoom=$currentZoom >= maxZoom=${config.maxZoom}")
                 removeAllAnnotationsForLayer(config.id)
                 return@forEach
             }
@@ -388,7 +398,9 @@ class ViewLayerController(
 
                 expected.value?.let { queriedRenderedFeatures ->
                     // --- Image mode short-circuit: render to style images, skip ViewAnnotations ---
-                    if (isImageMode(config)) {
+                    val imageModeBranch = isImageMode(config)
+                    Log.d(TAG, "queryFeatures BRANCH_DECISION | layer=${config.id} useImageMode=${config.useImageMode} imageCacheKeys=${config.imageCacheKeys} takingImageModePath=$imageModeBranch")
+                    if (imageModeBranch) {
                         handleImageModeFeatures(config, queriedRenderedFeatures)
                         return@let
                     }
@@ -537,6 +549,16 @@ class ViewLayerController(
         val batchStart = SystemClock.elapsedRealtime()
 
         val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
+        // Verify a sample image actually exists in the Mapbox style (not just our tracking set)
+        val style = mapboxMap.getStyle()
+        val sampleKey = existingImages.firstOrNull()
+        val sampleExistsInStyle = if (sampleKey != null && style != null) {
+            style.getStyleImage(sampleKey) != null
+        } else null
+        val iconImageProp = style?.getStyleLayerProperty(symbolLayerId, "icon-image")
+        val iconOpacityProp = style?.getStyleLayerProperty(symbolLayerId, "icon-opacity")
+        val layerVisibility = style?.getStyleLayerProperty(symbolLayerId, "visibility")
+        Log.d(TAG, "handleImageMode START | layer=${config.id} existingImagesCount=${existingImages.size} queriedFeatures=${queriedRenderedFeatures.size} sampleKey=$sampleKey existsInStyle=$sampleExistsInStyle iconImage=${iconImageProp?.value} iconOpacity=${iconOpacityProp?.value} visibility=${layerVisibility?.value}")
         val featuresToRender = mutableListOf<Pair<String, Map<String, Any?>>>()
 
         for (queriedRendered in queriedRenderedFeatures) {
@@ -564,11 +586,15 @@ class ViewLayerController(
             if (existingImages.contains(cacheKey)) continue
             if (featuresToRender.any { it.first == cacheKey }) continue
 
+            if (featuresToRender.isEmpty()) {
+                Log.d(TAG, "handleImageMode FIRST_CACHE_KEY | layer=${config.id} cacheKey=$cacheKey dataKeys=$dataKeys viewData=$viewData")
+            }
             featuresToRender.add(cacheKey to viewData)
         }
 
         // Render new variations asynchronously
         var completedCount = 0
+        var successCount = 0
         val totalToRender = featuresToRender.size
 
         if (totalToRender == 0) {
@@ -579,6 +605,8 @@ class ViewLayerController(
             Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=0 totalImages=${existingImages.size}")
             return
         }
+
+        Log.d(TAG, "handleImageMode RENDER_START | layer=${config.id} toRender=$totalToRender")
 
         val padding = (config.imageCachePadding ?: 0.0).toFloat()
         for ((cacheKey, viewData) in featuresToRender) {
@@ -604,6 +632,7 @@ class ViewLayerController(
                         Log.w(TAG, "STYLE_IMAGE_REGISTER_FAIL cacheKey=$cacheKey error=${expected.error}")
                     } else {
                         existingImages.add(cacheKey)
+                        successCount++
                         Log.d(TAG, "STYLE_IMAGE_REGISTERED cacheKey=$cacheKey size=${bitmapCopy.width}x${bitmapCopy.height}")
                     }
                 }
@@ -612,8 +641,20 @@ class ViewLayerController(
                 if (completedCount == totalToRender) {
                     setIconImageExpression(config, symbolLayerId, exprKeys)
                     revealImageModeLayerIfNeeded(config, symbolLayerId)
+
+                    // Force renderer to re-evaluate icon-image expression after new images are registered.
+                    // On Android, images are registered asynchronously (after tile rendering), so the renderer
+                    // may have cached "image not found" results. Re-setting the expression invalidates this cache.
+                    if (successCount > 0) {
+                        mapboxMap.getStyle()?.let { style ->
+                            val currentExpr = style.getStyleLayerProperty(symbolLayerId, "icon-image")
+                            style.setStyleLayerProperty(symbolLayerId, "icon-image", currentExpr.value)
+                            Log.d(TAG, "IMAGE_MODE_REFRESH | layer=${config.id} re-set icon-image to force re-render")
+                        }
+                    }
+
                     val batchMs = SystemClock.elapsedRealtime() - batchStart
-                    Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=$totalToRender totalImages=${existingImages.size}")
+                    Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} batchMs=${batchMs} newImages=$successCount attempted=$totalToRender totalImages=${existingImages.size}")
                 }
             }
         }
@@ -666,7 +707,19 @@ class ViewLayerController(
     }
 
     private fun revealImageModeLayerIfNeeded(config: ViewLayerConfig, symbolLayerId: String) {
-        if (imageModeInitialBatchDone.contains(config.id)) return
+        if (imageModeInitialBatchDone.contains(config.id)) {
+            Log.d(TAG, "revealImageMode SKIPPED (already done) | layer=${config.id}")
+            return
+        }
+
+        // Don't reveal until at least one image has been registered
+        val existingImages = registeredStyleImages[config.id]
+        if (existingImages == null || existingImages.isEmpty()) {
+            Log.d(TAG, "revealImageMode DEFERRED (no images yet) | layer=${config.id}")
+            return
+        }
+
+        Log.d(TAG, "revealImageMode REVEALING | layer=${config.id} symbolLayer=$symbolLayerId imageCount=${existingImages.size}")
         imageModeInitialBatchDone.add(config.id)
 
         val style = mapboxMap.getStyle() ?: return
@@ -690,7 +743,10 @@ class ViewLayerController(
         // Restore text-opacity
         style.setStyleLayerProperty(symbolLayerId, "text-opacity", com.mapbox.bindgen.Value.valueOf(1.0))
 
-        Log.d(TAG, "IMAGE_MODE_REVEALED layer=${config.id} symbolLayer=$symbolLayerId")
+        // Verify icon-image property was set correctly
+        val iconImageProp = style.getStyleLayerProperty(symbolLayerId, "icon-image")
+        val iconOpacityProp = style.getStyleLayerProperty(symbolLayerId, "icon-opacity")
+        Log.d(TAG, "IMAGE_MODE_REVEALED layer=${config.id} symbolLayer=$symbolLayerId iconImage=${iconImageProp.value} iconOpacity=${iconOpacityProp.value}")
     }
 
     // endregion
@@ -994,6 +1050,9 @@ class ViewLayerController(
     // endregion
 
     private fun removeAllAnnotationsForLayer(layerId: String) {
+        val imageCount = registeredStyleImages[layerId]?.size ?: 0
+        val annotationCount = featureAnnotations[layerId]?.size ?: 0
+        Log.d(TAG, "removeAllAnnotationsForLayer CALLED | layer=$layerId images=$imageCount annotations=$annotationCount expressionSet=${imageModeExpressionSet.contains(layerId)} initialBatchDone=${imageModeInitialBatchDone.contains(layerId)}")
         // Cancel any pending demotions for this layer
         val pendingForLayer = pendingDemotions.filter { (key, _) -> key.startsWith(layerId) }
         pendingForLayer.forEach { (annotationId, runnable) ->

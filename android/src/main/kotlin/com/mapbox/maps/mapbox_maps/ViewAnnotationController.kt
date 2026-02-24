@@ -68,6 +68,7 @@ class ViewAnnotationController(
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
     private val imageCache = mutableMapOf<String, Bitmap>()
+    private val pendingRenders = mutableSetOf<String>()  // Track in-flight render cache keys to prevent flooding
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
     private val visibilityStates = mutableMapOf<String, MutableState<Boolean>>()  // Track visibility state per annotation
@@ -230,12 +231,23 @@ class ViewAnnotationController(
             return
         }
 
-        val factory = ViewAnnotationRegistry.getFactory(layoutName)
-        if (factory == null) {
-            Log.w(TAG, "renderViewToBitmap FAILED — no factory for '$layoutName'")
+        // Prevent flooding: skip if this cache key is already being rendered
+        if (pendingRenders.contains(cacheKey)) {
+            Log.d(TAG, "renderViewToBitmap DEDUPED — already in-flight cacheKey=$cacheKey")
             callback(null)
             return
         }
+        pendingRenders.add(cacheKey)
+
+        val factory = ViewAnnotationRegistry.getFactory(layoutName)
+        if (factory == null) {
+            Log.w(TAG, "renderViewToBitmap FAILED — no factory for '$layoutName'")
+            pendingRenders.remove(cacheKey)
+            callback(null)
+            return
+        }
+
+        Log.d(TAG, "renderViewToBitmap START | cacheKey=$cacheKey layout=$layoutName pendingCount=${pendingRenders.size}")
 
         val density = context.resources.displayMetrics.density
         val paddingPx = (padding * density).toInt()
@@ -265,6 +277,7 @@ class ViewAnnotationController(
         val activity = findActivity(context)
         if (activity == null) {
             Log.w(TAG, "renderViewToBitmap FAILED — no activity")
+            pendingRenders.remove(cacheKey)
             callback(null)
             return
         }
@@ -278,13 +291,16 @@ class ViewAnnotationController(
         }
 
         composeView.post {
+            Log.d(TAG, "renderViewToBitmap POST1 | cacheKey=$cacheKey")
             composeView.post {
-                rootView.removeView(container)
+                Log.d(TAG, "renderViewToBitmap POST2 | cacheKey=$cacheKey width=${container.width} height=${container.height}")
 
                 val width = container.width
                 val height = container.height
                 if (width <= 0 || height <= 0) {
-                    Log.w(TAG, "renderViewToBitmap FAILED — size=${width}x${height}")
+                    Log.w(TAG, "renderViewToBitmap FAILED — size=${width}x${height} cacheKey=$cacheKey")
+                    rootView.removeView(container)
+                    pendingRenders.remove(cacheKey)
                     callback(null)
                     return@post
                 }
@@ -297,7 +313,10 @@ class ViewAnnotationController(
                 canvas.translate(paddingPx.toFloat(), paddingPx.toFloat())
                 container.draw(canvas)
 
+                rootView.removeView(container)
+
                 imageCache[cacheKey] = bitmap
+                pendingRenders.remove(cacheKey)
                 Log.d(TAG, "STYLE_IMAGE_RENDERED cacheKey=$cacheKey size=${paddedWidth}x${paddedHeight} (content=${width}x${height} padding=${paddingPx}px)")
                 callback(bitmap)
             }
