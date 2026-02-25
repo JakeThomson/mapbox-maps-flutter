@@ -23,6 +23,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     private var annotationFeatures: [String: FeaturesetFeature?] = [:]  // Store FeaturesetFeature for tap callback
     private var sizeCache: [String: CGSize] = [:]  // layoutName -> cached size to skip expensive sizeView()
     private var imageCache: [String: UIImage] = [:]  // cacheKey -> rendered snapshot image
+    private let imageCacheLock = NSLock()  // Protects imageCache for background thread access
     private var imageModeLayerConfigs: [String: ImageModeLayerConfig] = [:]  // symbolLayerId -> config for tap fallback
     var imageModeFeatureData: [String: [String: Any]] = [:]  // annotationId -> cached feature data from image-mode tap
     private let tapEventChannel: FlutterMethodChannel
@@ -593,13 +594,27 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         return "\(value)"
     }
 
+    // MARK: - Thread-safe image cache accessors
+
+    private func getCachedImage(for key: String) -> UIImage? {
+        imageCacheLock.lock()
+        defer { imageCacheLock.unlock() }
+        return imageCache[key]
+    }
+
+    private func setCachedImage(_ image: UIImage, for key: String) {
+        imageCacheLock.lock()
+        defer { imageCacheLock.unlock() }
+        imageCache[key] = image
+    }
+
     /// Renders a native view to a UIImage for use as a Mapbox style image.
     /// Creates view via factory, renders to image, caches it, and returns the UIImage.
     /// Does NOT create any ViewAnnotation.
     func renderViewToImage(layoutName: String, data: [String: Any]?, cacheKeys: [String], padding: CGFloat = 0, overrideCacheKey: String? = nil) -> UIImage? {
         let cacheKey = overrideCacheKey ?? computeImageCacheKey(layoutName: layoutName, data: data, keys: cacheKeys)
 
-        if let cachedImage = imageCache[cacheKey] {
+        if let cachedImage = getCachedImage(for: cacheKey) {
             return cachedImage
         }
 
@@ -614,9 +629,47 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
             return nil
         }
 
-        imageCache[cacheKey] = image
+        setCachedImage(image, for: cacheKey)
         NSLog("[ViewLayerPerf] STYLE_IMAGE_RENDERED cacheKey=%@ size=%.0fx%.0f", cacheKey, image.size.width, image.size.height)
         return image
+    }
+
+    /// Renders an image using a registered image factory (CoreGraphics-based, thread-safe).
+    /// Can be called from any thread. Checks cache first, then calls the factory.
+    /// - Parameter scale: Screen scale factor (must be captured on the main thread before background dispatch).
+    func renderFromImageFactory(layoutName: String, data: [String: Any]?, cacheKey: String, padding: CGFloat = 0, scale: CGFloat) -> UIImage? {
+        if let cachedImage = getCachedImage(for: cacheKey) {
+            return cachedImage
+        }
+
+        guard let factory = ViewAnnotationRegistry.shared.getImageFactory(for: layoutName) else {
+            NSLog("[ViewLayerPerf] renderFromImageFactory FAILED — no image factory for '%@'", layoutName)
+            return nil
+        }
+
+        guard let image = factory(data, scale) else {
+            NSLog("[ViewLayerPerf] renderFromImageFactory FAILED — factory returned nil for '%@'", layoutName)
+            return nil
+        }
+
+        // Apply padding if needed
+        let finalImage: UIImage
+        if padding > 0 {
+            let paddedSize = CGSize(
+                width: image.size.width + padding * 2,
+                height: image.size.height + padding * 2
+            )
+            let renderer = UIGraphicsImageRenderer(size: paddedSize)
+            finalImage = renderer.image { _ in
+                image.draw(in: CGRect(x: padding, y: padding, width: image.size.width, height: image.size.height))
+            }
+        } else {
+            finalImage = image
+        }
+
+        setCachedImage(finalImage, for: cacheKey)
+        NSLog("[ViewLayerPerf] STYLE_IMAGE_RENDERED (imageFactory) cacheKey=%@ size=%.0fx%.0f", cacheKey, finalImage.size.width, finalImage.size.height)
+        return finalImage
     }
 
     // MARK: - Image mode layer registration (for tap fallback)

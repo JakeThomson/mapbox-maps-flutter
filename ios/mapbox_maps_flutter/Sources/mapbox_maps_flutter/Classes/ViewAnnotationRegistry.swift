@@ -30,11 +30,19 @@ public typealias ViewAnnotationFactory = ([String: Any]?) -> UIView
 /// Factory that also receives a visibility object for animations.
 public typealias ViewAnnotationFactoryWithVisibility = ([String: Any]?, ViewAnnotationVisibility) -> UIView
 
+/// Factory that renders directly to a UIImage using CoreGraphics (thread-safe, no UIKit views).
+/// - Parameters:
+///   - data: The annotation data dictionary.
+///   - scale: The screen scale factor (e.g. 2.0, 3.0).
+/// - Returns: A rendered UIImage, or nil on failure.
+public typealias ViewAnnotationImageFactory = (_ data: [String: Any]?, _ scale: CGFloat) -> UIImage?
+
 public class ViewAnnotationRegistry {
     public static let shared = ViewAnnotationRegistry()
 
     private var factories: [String: ViewAnnotationFactory] = [:]
     private var factoriesWithVisibility: [String: ViewAnnotationFactoryWithVisibility] = [:]
+    private var imageFactories: [String: ViewAnnotationImageFactory] = [:]
 
     private init() {}
 
@@ -84,6 +92,26 @@ public class ViewAnnotationRegistry {
 
     func supportsVisibility(for viewIdentifier: String) -> Bool {
         return factoriesWithVisibility[viewIdentifier] != nil
+    }
+
+    // MARK: - Image Factories
+
+    /// Register an image factory that renders directly to UIImage using CoreGraphics.
+    /// Image factories are thread-safe and can run on background queues.
+    public func registerImageFactory(viewIdentifier: String, factory: @escaping ViewAnnotationImageFactory) {
+        imageFactories[viewIdentifier] = factory
+    }
+
+    public func unregisterImageFactory(viewIdentifier: String) {
+        imageFactories.removeValue(forKey: viewIdentifier)
+    }
+
+    func getImageFactory(for viewIdentifier: String) -> ViewAnnotationImageFactory? {
+        return imageFactories[viewIdentifier]
+    }
+
+    func hasImageFactory(for viewIdentifier: String) -> Bool {
+        return imageFactories[viewIdentifier] != nil
     }
 }
 

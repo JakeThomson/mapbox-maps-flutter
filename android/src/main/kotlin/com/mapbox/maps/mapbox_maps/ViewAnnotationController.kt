@@ -67,7 +67,7 @@ class ViewAnnotationController(
 
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
-    private val imageCache = mutableMapOf<String, Bitmap>()
+    private val imageCache = java.util.concurrent.ConcurrentHashMap<String, Bitmap>()
     private val pendingRenders = mutableSetOf<String>()  // Track in-flight render cache keys to prevent flooding
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
@@ -334,6 +334,44 @@ class ViewAnnotationController(
                 callback(bitmap)
             }
         }
+    }
+
+    /// Renders an image using a registered image factory (Canvas-based, thread-safe).
+    /// Can be called from any thread. Checks cache first, then calls the factory.
+    fun renderFromImageFactory(layoutName: String, data: Map<String, Any?>?, cacheKey: String, padding: Float = 0f, density: Float): Bitmap? {
+        val cachedBitmap = imageCache[cacheKey]
+        if (cachedBitmap != null) {
+            return cachedBitmap
+        }
+
+        val factory = ViewAnnotationRegistry.getImageFactory(layoutName)
+        if (factory == null) {
+            Log.w(TAG, "renderFromImageFactory FAILED — no image factory for '$layoutName'")
+            return null
+        }
+
+        val bitmap = factory(data ?: emptyMap(), density)
+        if (bitmap == null) {
+            Log.w(TAG, "renderFromImageFactory FAILED — factory returned null for '$layoutName'")
+            return null
+        }
+
+        // Apply padding if needed
+        val paddingPx = (padding * density).toInt()
+        val finalBitmap: Bitmap
+        if (paddingPx > 0) {
+            val paddedWidth = bitmap.width + paddingPx * 2
+            val paddedHeight = bitmap.height + paddingPx * 2
+            finalBitmap = Bitmap.createBitmap(paddedWidth, paddedHeight, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(finalBitmap)
+            canvas.drawBitmap(bitmap, paddingPx.toFloat(), paddingPx.toFloat(), null)
+        } else {
+            finalBitmap = bitmap
+        }
+
+        imageCache[cacheKey] = finalBitmap
+        Log.d(TAG, "STYLE_IMAGE_RENDERED (imageFactory) cacheKey=$cacheKey size=${finalBitmap.width}x${finalBitmap.height}")
+        return finalBitmap
     }
 
     // region Image mode layer registration (for tap fallback)

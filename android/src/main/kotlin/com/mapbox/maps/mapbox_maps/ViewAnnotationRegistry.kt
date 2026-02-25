@@ -1,5 +1,6 @@
 package com.mapbox.maps.mapbox_maps
 
+import android.graphics.Bitmap
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
@@ -33,8 +34,12 @@ val LocalViewAnnotationVisible = compositionLocalOf<State<Boolean>> {
 
 typealias ViewAnnotationFactory = @Composable (Map<String, Any?>) -> Unit
 
+/// Factory that renders directly to a Bitmap using Android Canvas (thread-safe, no Compose).
+typealias ViewAnnotationImageFactory = (data: Map<String, Any?>, density: Float) -> Bitmap?
+
 object ViewAnnotationRegistry {
     private val factories = mutableMapOf<String, ViewAnnotationFactory>()
+    private val imageFactories = mutableMapOf<String, ViewAnnotationImageFactory>()
 
     fun register(viewIdentifier: String, factory: ViewAnnotationFactory) {
         factories[viewIdentifier] = factory
@@ -50,6 +55,24 @@ object ViewAnnotationRegistry {
 
     internal fun hasFactory(viewIdentifier: String): Boolean {
         return factories.containsKey(viewIdentifier)
+    }
+
+    // Image Factories
+
+    fun registerImageFactory(viewIdentifier: String, factory: ViewAnnotationImageFactory) {
+        imageFactories[viewIdentifier] = factory
+    }
+
+    fun unregisterImageFactory(viewIdentifier: String) {
+        imageFactories.remove(viewIdentifier)
+    }
+
+    internal fun getImageFactory(viewIdentifier: String): ViewAnnotationImageFactory? {
+        return imageFactories[viewIdentifier]
+    }
+
+    internal fun hasImageFactory(viewIdentifier: String): Boolean {
+        return imageFactories.containsKey(viewIdentifier)
     }
 }
 

@@ -826,6 +826,43 @@ class ViewLayerController {
     private func drainImageRenderQueue() {
         guard isImageRenderBatchActive else { return }
 
+        // Fast path: if an image factory is registered, render ALL pending items on a background thread
+        if let config = activeImageBatchConfig,
+           ViewAnnotationRegistry.shared.hasImageFactory(for: config.layoutName) {
+            let allPending = pendingImageRenders
+            pendingImageRenders.removeAll()
+            let scale = UIScreen.main.scale  // Capture on main thread before background dispatch
+
+            NSLog("[ViewLayerPerf] IMAGE_FACTORY_DISPATCH layer=%@ count=%d", config.layoutName, allPending.count)
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                var results: [(cacheKey: String, image: UIImage)] = []
+
+                for pending in allPending {
+                    if let image = self.viewAnnotationController.renderFromImageFactory(
+                        layoutName: pending.config.layoutName,
+                        data: pending.viewData,
+                        cacheKey: pending.cacheKey,
+                        padding: pending.padding,
+                        scale: scale
+                    ) {
+                        results.append((cacheKey: pending.cacheKey, image: image))
+                    } else {
+                        NSLog("[ViewLayerPerf] IMAGE_FACTORY_RENDER_FAIL cacheKey=%@", pending.cacheKey)
+                    }
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.isImageRenderBatchActive else { return }
+                    self.pendingImageResults.append(contentsOf: results)
+                    self.commitImageBatch()
+                }
+            }
+            return
+        }
+
+        // Slow path: staggered main-thread rendering (existing behavior)
         let batch = Array(pendingImageRenders.prefix(maxImageRendersPerFrame))
         pendingImageRenders.removeFirst(min(maxImageRendersPerFrame, pendingImageRenders.count))
 

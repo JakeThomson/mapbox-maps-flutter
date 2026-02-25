@@ -94,10 +94,6 @@ class ViewLayerPerfMonitor {
         currentCycleId += 1
         cycleStartTime = CACurrentMediaTime()
         cycleMainThreadStart = CACurrentMediaTime()
-
-        NSLog("[ViewLayerPerf] UPDATE_CYCLE_START cycle=%llu trigger=%@ zoom=%.2f layers=%d annotations=%d",
-              currentCycleId, trigger, zoom, layerCount, currentAnnotationCount)
-
         return currentCycleId
     }
 
@@ -117,9 +113,6 @@ class ViewLayerPerfMonitor {
         cumulativeSizeMs += breakdown.sizeMs
         cumulativeAddToMapMs += breakdown.addToMapMs
 
-        NSLog("[ViewLayerPerf] CREATE_BREAKDOWN id=%@ total=%.1f factory=%.1f size=%.1f addToMap=%.1f",
-              breakdown.id, breakdown.totalMs, breakdown.factoryMs, breakdown.sizeMs, breakdown.addToMapMs)
-
         if breakdown.totalMs > slowCreateThresholdMs {
             NSLog("[ViewLayerPerf] SLOW_CREATE id=%@ total=%.1f factory=%.1f size=%.1f addToMap=%.1f",
                   breakdown.id, breakdown.totalMs, breakdown.factoryMs, breakdown.sizeMs, breakdown.addToMapMs)
@@ -130,9 +123,6 @@ class ViewLayerPerfMonitor {
 
     func recordAnnotationRemoval(id: String, durationMs: Double, remaining: Int) {
         periodRemoves += 1
-
-        NSLog("[ViewLayerPerf] REMOVE id=%@ duration=%.1f remaining=%d",
-              id, durationMs, remaining)
     }
 
     // MARK: - Query timing
@@ -149,12 +139,11 @@ class ViewLayerPerfMonitor {
             let frameDuration = (now - lastFrameTimestamp) * 1000  // ms
             if frameDuration > 20 {
                 periodDroppedFrames += 1
-                let opElapsed = operationStartTime > 0
-                    ? (CACurrentMediaTime() - operationStartTime) * 1000
-                    : 0.0
-
-                NSLog("[ViewLayerPerf] JANK frameDuration=%.1f during=%@ opElapsed=%.1f annotations=%d",
-                      frameDuration, currentOperation, opElapsed, currentAnnotationCount)
+                // Only log severe jank (>50ms = 3+ dropped frames) to reduce noise
+                if frameDuration > 50 {
+                    NSLog("[ViewLayerPerf] JANK frameDuration=%.1f during=%@ annotations=%d",
+                          frameDuration, currentOperation, currentAnnotationCount)
+                }
             }
         }
         lastFrameTimestamp = now
@@ -163,9 +152,11 @@ class ViewLayerPerfMonitor {
     // MARK: - Periodic stats
 
     private func logPeriodicStats() {
-        NSLog("[ViewLayerPerf] STATS annotations=%d creates=%d removes=%d droppedFrames=%d churn=%d cumulativeFactory=%.1f cumulativeSize=%.1f cumulativeAddToMap=%.1f cumulativeQuery=%.1f",
-              currentAnnotationCount, periodCreates, periodRemoves, periodDroppedFrames, periodChurnCount,
-              cumulativeFactoryMs, cumulativeSizeMs, cumulativeAddToMapMs, cumulativeQueryMs)
+        // Only log when something happened in this period
+        if periodDroppedFrames > 0 || periodCreates > 0 || periodRemoves > 0 {
+            NSLog("[ViewLayerPerf] STATS droppedFrames=%d creates=%d removes=%d churn=%d annotations=%d",
+                  periodDroppedFrames, periodCreates, periodRemoves, periodChurnCount, currentAnnotationCount)
+        }
 
         // Reset period counters
         periodCreates = 0

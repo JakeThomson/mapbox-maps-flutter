@@ -710,6 +710,43 @@ class ViewLayerController(
     private fun drainImageRenderQueue() {
         if (!isImageRenderBatchActive) return
 
+        // Fast path: if an image factory is registered, render ALL pending items on a background thread
+        val config = activeImageBatchConfig
+        if (config != null && ViewAnnotationRegistry.hasImageFactory(config.layoutName)) {
+            val allPending = ArrayList(pendingImageRenders)
+            pendingImageRenders.clear()
+            val density = mapView.context.resources.displayMetrics.density
+
+            Log.d(TAG, "IMAGE_FACTORY_DISPATCH layer=${config.layoutName} count=${allPending.size}")
+
+            Thread {
+                val results = mutableListOf<RenderedImageResult>()
+
+                for (pending in allPending) {
+                    val bitmap = viewAnnotationController.renderFromImageFactory(
+                        pending.config.layoutName,
+                        pending.viewData,
+                        pending.cacheKey,
+                        pending.padding,
+                        density
+                    )
+                    if (bitmap != null) {
+                        results.add(RenderedImageResult(pending.cacheKey, bitmap))
+                    } else {
+                        Log.w(TAG, "IMAGE_FACTORY_RENDER_FAIL cacheKey=${pending.cacheKey}")
+                    }
+                }
+
+                mainHandler.post {
+                    if (!isImageRenderBatchActive) return@post
+                    pendingImageResults.addAll(results)
+                    commitImageBatch()
+                }
+            }.start()
+            return
+        }
+
+        // Slow path: staggered main-thread rendering (existing behavior)
         val batch = pendingImageRenders.take(maxImageRendersPerFrame)
         pendingImageRenders.subList(0, batch.size).clear()
 
