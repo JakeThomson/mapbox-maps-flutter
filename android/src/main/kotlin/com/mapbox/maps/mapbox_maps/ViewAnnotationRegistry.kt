@@ -6,38 +6,38 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateOf
 
-/**
- * CompositionLocal providing the current visibility state of a view annotation.
- *
- * Use this in your Composable factory to animate entrance/exit based on
- * Mapbox collision detection and visibility changes.
- *
- * Example usage:
- * ```kotlin
- * ViewAnnotationRegistry.register("my_marker") { data ->
- *     val isVisible by LocalViewAnnotationVisible.current
- *
- *     val alpha by animateFloatAsState(
- *         targetValue = if (isVisible) 1f else 0f,
- *         animationSpec = tween(200)
- *     )
- *
- *     Box(modifier = Modifier.alpha(alpha)) {
- *         MyMarkerContent(data)
- *     }
- * }
- * ```
- */
-val LocalViewAnnotationVisible = compositionLocalOf<State<Boolean>> {
-    mutableStateOf(true)
-}
-
 typealias ViewAnnotationFactory = @Composable (Map<String, Any?>) -> Unit
 
 /// Factory that renders directly to a Bitmap using Android Canvas (thread-safe, no Compose).
 typealias ViewAnnotationImageFactory = (data: Map<String, Any?>, density: Float) -> Bitmap?
 
 object ViewAnnotationRegistry {
+    /**
+     * CompositionLocal providing the current visibility state of a view annotation.
+     *
+     * Use this in your Composable factory to animate entrance/exit based on
+     * Mapbox collision detection and visibility changes.
+     *
+     * Example usage:
+     * ```kotlin
+     * ViewAnnotationRegistry.register("my_marker") { data ->
+     *     val isVisible by ViewAnnotationRegistry.LocalViewAnnotationVisible.current
+     *
+     *     val alpha by animateFloatAsState(
+     *         targetValue = if (isVisible) 1f else 0f,
+     *         animationSpec = tween(200)
+     *     )
+     *
+     *     Box(modifier = Modifier.alpha(alpha)) {
+     *         MyMarkerContent(data)
+     *     }
+     * }
+     * ```
+     */
+    val LocalViewAnnotationVisible = compositionLocalOf<State<Boolean>> {
+        mutableStateOf(true)
+    }
+
     private val factories = mutableMapOf<String, ViewAnnotationFactory>()
     private val imageFactories = mutableMapOf<String, ViewAnnotationImageFactory>()
 

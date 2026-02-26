@@ -45,6 +45,9 @@ import com.mapbox.maps.MapView
 import com.mapbox.maps.ViewAnnotationAnchor
 import com.mapbox.maps.viewannotation.OnViewAnnotationUpdatedListener
 import com.mapbox.maps.viewannotation.ViewAnnotationManager
+import com.mapbox.maps.viewannotation.annotatedLayerFeature
+import com.mapbox.maps.viewannotation.annotationAnchor
+import com.mapbox.maps.viewannotation.geometry
 import com.mapbox.maps.viewannotation.viewAnnotationOptions
 
 data class ImageModeLayerConfig(
@@ -180,7 +183,7 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+            CompositionLocalProvider(ViewAnnotationRegistry.LocalViewAnnotationVisible provides visibilityState) {
                 factory(data ?: emptyMap())
             }
         }
@@ -456,7 +459,7 @@ class ViewAnnotationController(
         rootView.addView(container)
 
         composeView.setContent {
-            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+            CompositionLocalProvider(ViewAnnotationRegistry.LocalViewAnnotationVisible provides visibilityState) {
                 factory(data ?: emptyMap())
             }
         }
@@ -525,7 +528,7 @@ class ViewAnnotationController(
                     if (factory != null) {
                         val visibilityState = visibilityStates[id] ?: mutableStateOf(true)
                         composeView.setContent {
-                            CompositionLocalProvider(LocalViewAnnotationVisible provides visibilityState) {
+                            CompositionLocalProvider(ViewAnnotationRegistry.LocalViewAnnotationVisible provides visibilityState) {
                                 factory(data)
                             }
                         }
