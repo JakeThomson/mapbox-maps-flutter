@@ -46,7 +46,6 @@ import com.mapbox.maps.ViewAnnotationAnchor
 import com.mapbox.maps.viewannotation.OnViewAnnotationUpdatedListener
 import com.mapbox.maps.viewannotation.ViewAnnotationManager
 import com.mapbox.maps.viewannotation.viewAnnotationOptions
-import com.mapbox.maps.viewannotation.*
 
 data class ImageModeLayerConfig(
     val symbolLayerId: String,
