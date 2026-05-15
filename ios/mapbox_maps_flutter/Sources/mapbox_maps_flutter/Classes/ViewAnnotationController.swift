@@ -22,8 +22,14 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     private var visibilityObjects: [String: ViewAnnotationVisibility] = [:]  // Track visibility state per annotation
     private var annotationFeatures: [String: FeaturesetFeature?] = [:]  // Store FeaturesetFeature for tap callback
     private var sizeCache: [String: CGSize] = [:]  // layoutName -> cached size to skip expensive sizeView()
-    private var imageCache: [String: UIImage] = [:]  // cacheKey -> rendered snapshot image
-    private let imageCacheLock = NSLock()  // Protects imageCache for background thread access
+    // NSCache: bounded LRU + automatic eviction under memory pressure. countLimit caps distinct-key
+    // accumulation over long sessions (every unique emoji/label/avatarURL combo = one entry). NSCache
+    // is internally thread-safe so no extra lock is needed.
+    private let imageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 512
+        return cache
+    }()
     private var imageModeLayerConfigs: [String: ImageModeLayerConfig] = [:]  // symbolLayerId -> config for tap fallback
     var imageModeFeatureData: [String: [String: Any]] = [:]  // annotationId -> cached feature data from image-mode tap
     private let tapEventChannel: FlutterMethodChannel
@@ -597,15 +603,11 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     // MARK: - Thread-safe image cache accessors
 
     private func getCachedImage(for key: String) -> UIImage? {
-        imageCacheLock.lock()
-        defer { imageCacheLock.unlock() }
-        return imageCache[key]
+        return imageCache.object(forKey: key as NSString)
     }
 
     private func setCachedImage(_ image: UIImage, for key: String) {
-        imageCacheLock.lock()
-        defer { imageCacheLock.unlock() }
-        imageCache[key] = image
+        imageCache.setObject(image, forKey: key as NSString)
     }
 
     /// Renders a native view to a UIImage for use as a Mapbox style image.

@@ -88,6 +88,11 @@ class ViewLayerController {
     private let maxImageRendersPerFrame = 5
     private var activeImageBatchConfig: ViewLayerConfig? = nil
     private var activeImageBatchSymbolLayerId: String? = nil
+    // Monotonic token incremented on every batch start. Background renders carry the token they started
+    // with; main-thread continuations check it against this value and drop stale results, so a superseded
+    // batch can't contaminate the new batch's pendingImageResults or registeredStyleImages.
+    private var imageBatchToken: UInt64 = 0
+    private var activeImageBatchToken: UInt64 = 0
 
     // Churn detection
     private var recentlyRemoved: [String: [String: CFTimeInterval]] = [:]  // layerId -> featureId -> remove time
@@ -232,6 +237,8 @@ class ViewLayerController {
 
             // Cancel any in-progress image render batch for this layer
             if self.activeImageBatchConfig?.id == layerId {
+                self.imageBatchToken &+= 1  // invalidate any in-flight background dispatch
+                self.activeImageBatchToken = self.imageBatchToken
                 self.pendingImageRenders.removeAll()
                 self.pendingImageResults.removeAll()
                 self.isImageRenderBatchActive = false
@@ -728,12 +735,12 @@ class ViewLayerController {
         let effectiveKeys = getEffectiveKeys(config)
         let useFeatureIds = effectiveKeys == nil
 
-        // If a batch is already active for this layer, cancel it and restart with fresh data
+        // If a batch is already active for this layer, supersede it. The token bump below (when we re-arm
+        // the batch) will cause the in-flight background dispatch to drop its results on the main thread.
+        // Clearing pendingImageRenders is fine because the dispatch already took a local snapshot.
         if isImageRenderBatchActive && activeImageBatchConfig?.id == config.id {
             pendingImageRenders.removeAll()
-            pendingImageResults.removeAll()
-            isImageRenderBatchActive = false
-            NSLog("[ViewLayerPerf] IMAGE_BATCH_CANCELLED layer=%@ (superseded by new query)", config.id)
+            NSLog("[ViewLayerPerf] IMAGE_BATCH_SUPERSEDED layer=%@ oldToken=%llu", config.id, activeImageBatchToken)
         }
 
         var existingImages = registeredStyleImages[config.id] ?? []
@@ -812,13 +819,16 @@ class ViewLayerController {
             return
         }
 
-        // Queue for staggered rendering
+        // Queue for staggered rendering. Bump the batch token so any in-flight background dispatch from a
+        // superseded batch will be rejected when it tries to commit.
+        imageBatchToken &+= 1
+        activeImageBatchToken = imageBatchToken
         pendingImageRenders = pendingItems
         pendingImageResults = []
         isImageRenderBatchActive = true
         activeImageBatchConfig = config
         activeImageBatchSymbolLayerId = symbolLayerId
-        NSLog("[ViewLayerPerf] IMAGE_BATCH_QUEUED layer=%@ count=%d", config.id, pendingItems.count)
+        NSLog("[ViewLayerPerf] IMAGE_BATCH_QUEUED layer=%@ count=%d token=%llu", config.id, pendingItems.count, activeImageBatchToken)
         drainImageRenderQueue()
     }
 
@@ -832,8 +842,9 @@ class ViewLayerController {
             let allPending = pendingImageRenders
             pendingImageRenders.removeAll()
             let scale = UIScreen.main.scale  // Capture on main thread before background dispatch
+            let dispatchToken = activeImageBatchToken
 
-            NSLog("[ViewLayerPerf] IMAGE_FACTORY_DISPATCH layer=%@ count=%d", config.layoutName, allPending.count)
+            NSLog("[ViewLayerPerf] IMAGE_FACTORY_DISPATCH layer=%@ count=%d token=%llu", config.layoutName, allPending.count, dispatchToken)
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
@@ -849,12 +860,20 @@ class ViewLayerController {
                     ) {
                         results.append((cacheKey: pending.cacheKey, image: image))
                     } else {
-                        NSLog("[ViewLayerPerf] IMAGE_FACTORY_RENDER_FAIL cacheKey=%@", pending.cacheKey)
+                        NSLog("[ViewLayerPerf] IMAGE_FACTORY_RENDER_FAIL cacheKey=%@ token=%llu", pending.cacheKey, dispatchToken)
                     }
                 }
 
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.isImageRenderBatchActive else { return }
+                    guard let self = self else { return }
+                    // Reject results from a superseded batch — they'd otherwise be registered under the
+                    // current batch's config, and the current batch's own results would then be dropped
+                    // when its mainHandler.post finds isImageRenderBatchActive == false.
+                    if dispatchToken != self.activeImageBatchToken {
+                        NSLog("[ViewLayerPerf] IMAGE_BATCH_STALE_RESULTS dispatched=%llu current=%llu dropped=%d", dispatchToken, self.activeImageBatchToken, results.count)
+                        return
+                    }
+                    guard self.isImageRenderBatchActive else { return }
                     self.pendingImageResults.append(contentsOf: results)
                     self.commitImageBatch()
                 }

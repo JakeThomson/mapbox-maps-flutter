@@ -69,7 +69,10 @@ class ViewAnnotationController(
 
     private val annotations = mutableMapOf<String, View>()
     private val layoutNames = mutableMapOf<String, String>()
-    private val imageCache = java.util.concurrent.ConcurrentHashMap<String, Bitmap>()
+    // Bounded LRU: caps distinct-key accumulation over long sessions. Every unique
+    // emoji/label/avatarURL combo is one entry, so personal-views with 3 cache keys can grow fast.
+    // android.util.LruCache is thread-safe.
+    private val imageCache = android.util.LruCache<String, Bitmap>(256)
     private val pendingRenders = mutableSetOf<String>()  // Track in-flight render cache keys to prevent flooding
     private val annotationData = mutableMapOf<String, Map<String, Any?>>()
     private val viewLayerAnnotations = mutableSetOf<String>()  // Track ViewLayer-created annotations
@@ -240,7 +243,7 @@ class ViewAnnotationController(
     fun renderViewToBitmap(layoutName: String, data: Map<String, Any?>?, cacheKeys: List<String>, padding: Float = 0f, overrideCacheKey: String? = null, callback: (Bitmap?) -> Unit) {
         val cacheKey = overrideCacheKey ?: computeImageCacheKey(layoutName, data, cacheKeys)
 
-        val cachedBitmap = imageCache[cacheKey]
+        val cachedBitmap = imageCache.get(cacheKey)
         if (cachedBitmap != null) {
             callback(cachedBitmap)
             return
@@ -330,7 +333,7 @@ class ViewAnnotationController(
 
                 rootView.removeView(container)
 
-                imageCache[cacheKey] = bitmap
+                imageCache.put(cacheKey, bitmap)
                 pendingRenders.remove(cacheKey)
                 Log.d(TAG, "STYLE_IMAGE_RENDERED cacheKey=$cacheKey size=${paddedWidth}x${paddedHeight} (content=${width}x${height} padding=${paddingPx}px)")
                 callback(bitmap)
@@ -341,7 +344,7 @@ class ViewAnnotationController(
     /// Renders an image using a registered image factory (Canvas-based, thread-safe).
     /// Can be called from any thread. Checks cache first, then calls the factory.
     fun renderFromImageFactory(layoutName: String, data: Map<String, Any?>?, cacheKey: String, padding: Float = 0f, density: Float): Bitmap? {
-        val cachedBitmap = imageCache[cacheKey]
+        val cachedBitmap = imageCache.get(cacheKey)
         if (cachedBitmap != null) {
             return cachedBitmap
         }
@@ -371,7 +374,7 @@ class ViewAnnotationController(
             finalBitmap = bitmap
         }
 
-        imageCache[cacheKey] = finalBitmap
+        imageCache.put(cacheKey, finalBitmap)
         Log.d(TAG, "STYLE_IMAGE_RENDERED (imageFactory) cacheKey=$cacheKey size=${finalBitmap.width}x${finalBitmap.height}")
         return finalBitmap
     }
