@@ -101,11 +101,6 @@ class ViewLayerController(
     private val maxImageRendersPerFrame = 8
     private var activeImageBatchConfig: ViewLayerConfig? = null
     private var activeImageBatchSymbolLayerId: String? = null
-    // Monotonic token incremented on every batch start. Background threads carry the token they were
-    // dispatched with; main-thread continuations reject results whose token != activeImageBatchToken, so
-    // a superseded batch can't pollute the current batch's pendingImageResults or registeredStyleImages.
-    @Volatile private var imageBatchToken: Long = 0
-    @Volatile private var activeImageBatchToken: Long = 0
 
     // Churn detection
     private val recentlyRemoved = mutableMapOf<String, MutableMap<String, Long>>() // layerId -> featureId -> remove time
@@ -273,8 +268,6 @@ class ViewLayerController(
 
                 // Cancel any in-progress image render batch for this layer
                 if (activeImageBatchConfig?.id == layerId) {
-                    imageBatchToken += 1  // invalidate any in-flight background dispatch
-                    activeImageBatchToken = imageBatchToken
                     pendingImageRenders.clear()
                     pendingImageResults.clear()
                     isImageRenderBatchActive = false
@@ -635,12 +628,12 @@ class ViewLayerController(
         val effectiveKeys = getEffectiveKeys(config)
         val useFeatureIds = effectiveKeys == null
 
-        // If a batch is already active for this layer, supersede it. The token bump below (when we re-arm
-        // the batch) causes the in-flight background Thread's mainHandler.post to drop its results.
-        // Clearing pendingImageRenders is fine because the dispatch already took a local ArrayList copy.
+        // If a batch is already active for this layer, cancel it and restart with fresh data
         if (isImageRenderBatchActive && activeImageBatchConfig?.id == config.id) {
             pendingImageRenders.clear()
-            Log.d(TAG, "IMAGE_BATCH_SUPERSEDED layer=${config.id} oldToken=$activeImageBatchToken")
+            pendingImageResults.clear()
+            isImageRenderBatchActive = false
+            Log.d(TAG, "IMAGE_BATCH_CANCELLED layer=${config.id} (superseded by new query)")
         }
 
         val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
@@ -679,14 +672,7 @@ class ViewLayerController(
             } else {
                 cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, effectiveKeys!!.first)
             }
-            if (existingImages.contains(cacheKey)) {
-                // Verify Mapbox still has the image registered. If the style image got evicted (style
-                // reload, internal cache pressure), our tracking set was lying — drop the entry so this
-                // cacheKey gets re-rendered and re-registered below. Mirrors the iOS imageExists check.
-                if (mapboxMap.getStyle()?.hasStyleImage(cacheKey) == true) continue
-                existingImages.remove(cacheKey)
-                Log.d(TAG, "STYLE_IMAGE_STALE cacheKey=$cacheKey — tracked but missing from style, will re-register")
-            }
+            if (existingImages.contains(cacheKey)) continue
             if (pendingItems.any { it.cacheKey == cacheKey }) continue
 
             val padding = (config.imageCachePadding ?: 0.0).toFloat()
@@ -708,17 +694,14 @@ class ViewLayerController(
             return
         }
 
-        // Queue for staggered rendering. Bump the batch token so any in-flight background dispatch from
-        // a superseded batch will be rejected when it tries to commit on the main thread.
-        imageBatchToken += 1
-        activeImageBatchToken = imageBatchToken
+        // Queue for staggered rendering
         pendingImageRenders.clear()
         pendingImageRenders.addAll(pendingItems)
         pendingImageResults.clear()
         isImageRenderBatchActive = true
         activeImageBatchConfig = config
         activeImageBatchSymbolLayerId = symbolLayerId
-        Log.d(TAG, "IMAGE_BATCH_QUEUED layer=${config.id} count=${pendingItems.size} token=$activeImageBatchToken")
+        Log.d(TAG, "IMAGE_BATCH_QUEUED layer=${config.id} count=${pendingItems.size}")
         drainImageRenderQueue()
     }
     // endregion
@@ -733,42 +716,28 @@ class ViewLayerController(
             val allPending = ArrayList(pendingImageRenders)
             pendingImageRenders.clear()
             val density = mapView.context.resources.displayMetrics.density
-            val dispatchToken = activeImageBatchToken
 
-            Log.d(TAG, "IMAGE_FACTORY_DISPATCH layer=${config.layoutName} count=${allPending.size} token=$dispatchToken")
+            Log.d(TAG, "IMAGE_FACTORY_DISPATCH layer=${config.layoutName} count=${allPending.size}")
 
             Thread {
                 val results = mutableListOf<RenderedImageResult>()
-                try {
-                    for (pending in allPending) {
-                        val bitmap = viewAnnotationController.renderFromImageFactory(
-                            pending.config.layoutName,
-                            pending.viewData,
-                            pending.cacheKey,
-                            pending.padding,
-                            density
-                        )
-                        if (bitmap != null) {
-                            results.add(RenderedImageResult(pending.cacheKey, bitmap))
-                        } else {
-                            Log.w(TAG, "IMAGE_FACTORY_RENDER_FAIL cacheKey=${pending.cacheKey} token=$dispatchToken")
-                        }
+
+                for (pending in allPending) {
+                    val bitmap = viewAnnotationController.renderFromImageFactory(
+                        pending.config.layoutName,
+                        pending.viewData,
+                        pending.cacheKey,
+                        pending.padding,
+                        density
+                    )
+                    if (bitmap != null) {
+                        results.add(RenderedImageResult(pending.cacheKey, bitmap))
+                    } else {
+                        Log.w(TAG, "IMAGE_FACTORY_RENDER_FAIL cacheKey=${pending.cacheKey}")
                     }
-                } catch (t: Throwable) {
-                    // Anything (OOM, factory exception) — log and fall through so the main-thread
-                    // continuation still fires and clears isImageRenderBatchActive. Without this,
-                    // an uncaught exception would leave the layer stuck.
-                    Log.e(TAG, "IMAGE_FACTORY_THREAD_FAIL token=$dispatchToken", t)
                 }
 
                 mainHandler.post {
-                    // Reject results from a superseded batch — they'd otherwise be registered under the
-                    // current batch's config, and the current batch's own results would then be dropped
-                    // when its post finds isImageRenderBatchActive == false after commitImageBatch.
-                    if (dispatchToken != activeImageBatchToken) {
-                        Log.d(TAG, "IMAGE_BATCH_STALE_RESULTS dispatched=$dispatchToken current=$activeImageBatchToken dropped=${results.size}")
-                        return@post
-                    }
                     if (!isImageRenderBatchActive) return@post
                     pendingImageResults.addAll(results)
                     commitImageBatch()
@@ -816,7 +785,6 @@ class ViewLayerController(
         val symbolLayerId = activeImageBatchSymbolLayerId ?: return
         val effectiveKeys = getEffectiveKeys(config)
         val useFeatureIds = effectiveKeys == null
-        val commitToken = activeImageBatchToken
 
         val results = ArrayList(pendingImageResults)
         pendingImageResults.clear()
@@ -826,26 +794,16 @@ class ViewLayerController(
             data class PreparedImage(val cacheKey: String, val width: Int, val height: Int, val byteBuffer: java.nio.ByteBuffer)
             val preparedImages = mutableListOf<PreparedImage>()
 
-            try {
-                for (result in results) {
-                    val bitmapCopy = result.bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                    val byteBuffer = java.nio.ByteBuffer.allocateDirect(bitmapCopy.byteCount)
-                    bitmapCopy.copyPixelsToBuffer(byteBuffer)
-                    preparedImages.add(PreparedImage(result.cacheKey, bitmapCopy.width, bitmapCopy.height, byteBuffer))
-                    bitmapCopy.recycle()
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "COMMIT_PREP_THREAD_FAIL token=$commitToken", t)
-                // Fall through so the main-thread block runs and clears isImageRenderBatchActive — no
-                // stuck state.
+            for (result in results) {
+                val bitmapCopy = result.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                val byteBuffer = java.nio.ByteBuffer.allocateDirect(bitmapCopy.byteCount)
+                bitmapCopy.copyPixelsToBuffer(byteBuffer)
+                preparedImages.add(PreparedImage(result.cacheKey, bitmapCopy.width, bitmapCopy.height, byteBuffer))
+                bitmapCopy.recycle()
             }
 
             // Post back to main thread for style registration
             mainHandler.post {
-                if (commitToken != activeImageBatchToken) {
-                    Log.d(TAG, "IMAGE_COMMIT_STALE commit=$commitToken current=$activeImageBatchToken dropped=${preparedImages.size}")
-                    return@post
-                }
                 if (!isImageRenderBatchActive || activeImageBatchConfig?.id != config.id) return@post
 
                 val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
