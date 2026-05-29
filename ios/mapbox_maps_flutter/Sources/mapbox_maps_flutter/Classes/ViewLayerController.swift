@@ -52,6 +52,12 @@ class ViewLayerController {
 
     // Image mode: style image tracking
     private var registeredStyleImages: [String: Set<String>] = [:]  // layerId -> set of registered style image IDs
+    private var registeredStyleImageBytes: [String: Int] = [:]  // layerId -> cumulative bytes of registered images (instrumentation only)
+    // Mapbox can silently evict style images we registered (no observer fires).
+    // We keep our own UIImage backup so we can re-register synchronously from
+    // memory when imageExists() reports the image is gone — skipping the
+    // factory and any network fetch it would do. Keyed by layerId then cacheKey.
+    private var registeredImageCache: [String: [String: UIImage]] = [:]
     private var imageModeExpressionSet: Set<String> = []  // layers where iconImage expression has been set
     private var imageModeFeatureMapping: [String: [String: String]] = [:]  // layerId → (featureId → imageName)
 
@@ -115,6 +121,7 @@ class ViewLayerController {
         setupStyleImageMissingObserver()
         setupStyleImageRemoveUnusedObserver()
         ViewLayerPerfMonitor.shared.startMonitoring()
+        NSLog("[ViewLayerDebug] CONTROLLER_INIT version=2026-05-29-04 — if you do not see this on app start, the build is stale")
     }
 
     private func setupMethodChannels() {
@@ -255,10 +262,29 @@ class ViewLayerController {
         }
     }
 
+    private var lastCameraTileLog: (z: Int, x: Int, y: Int)? = nil
     private func setupCameraObserver() {
         cameraObserver = mapView.mapboxMap.onCameraChanged.observe { [weak self] _ in
-            self?.lastUpdateTrigger = "cameraChanged"
-            self?.scheduleUpdate()
+            guard let self = self else { return }
+            self.lastUpdateTrigger = "cameraChanged"
+            self.scheduleUpdate()
+            // Throttled tile log — only emits when the user crosses into a
+            // different tile (or zooms to a different integer zoom). Lets us
+            // correlate a "this tile has blank pins" report with a tile URL
+            // we can fetch and decode.
+            let camera = self.mapView.mapboxMap.cameraState
+            let z = Int(camera.zoom.rounded())
+            let lat = camera.center.latitude
+            let lng = camera.center.longitude
+            let n = pow(2.0, Double(z))
+            let xt = Int(floor((lng + 180.0) / 360.0 * n))
+            let latRad = lat * .pi / 180.0
+            let yt = Int(floor((1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / .pi) / 2.0 * n))
+            let key = (z: z, x: xt, y: yt)
+            if self.lastCameraTileLog == nil || self.lastCameraTileLog! != key {
+                self.lastCameraTileLog = key
+                NSLog("[ViewLayerDebug] CAMERA_TILE z=%d x=%d y=%d lat=%.6f lng=%.6f", z, xt, yt, lat, lng)
+            }
         }
     }
 
@@ -294,6 +320,19 @@ class ViewLayerController {
             // Check if this is one of our registered style images
             for (layerId, imageIds) in self.registeredStyleImages {
                 if imageIds.contains(imageId) {
+                    // Try synchronous re-register from our UIImage backup so the
+                    // very next render pass finds the image, instead of waiting
+                    // for the debounced update cycle (which would also have to
+                    // wait on the factory / network).
+                    if let cachedImage = self.registeredImageCache[layerId]?[imageId] {
+                        do {
+                            try self.mapView.mapboxMap.addImage(cachedImage, id: imageId, sdf: false, stretchX: [], stretchY: [], content: nil)
+                            NSLog("[ViewLayerDebug] STYLE_IMAGE_MISSING_REREGISTERED imageId=%@ layer=%@", imageId, layerId)
+                            return
+                        } catch {
+                            NSLog("[ViewLayerDebug] STYLE_IMAGE_MISSING_REREGISTER_FAIL imageId=%@ error=%@ — falling through", imageId, error.localizedDescription)
+                        }
+                    }
                     NSLog("[ViewLayerDebug] STYLE_IMAGE_MISSING imageId=%@ layer=%@ — removing from tracking to force re-registration", imageId, layerId)
                     self.registeredStyleImages[layerId]?.remove(imageId)
                     self.lastUpdateTrigger = "styleImageMissing"
@@ -453,6 +492,18 @@ class ViewLayerController {
 
         perfMonitor.beginOperation("queryRenderedFeatures:\(config.id)")
 
+        // Image-mode layers go through querySourceFeatures so we see every
+        // feature in the loaded tiles, not just the ones that are currently
+        // rendered. queryRenderedFeatures has a chicken-and-egg problem with
+        // symbols whose icon-image expression resolves to a yet-unregistered
+        // cache key AND whose text-field renders nothing — the symbol is
+        // invisible, queryRenderedFeatures skips it, the icon never registers,
+        // and the pin stays blank forever.
+        if isImageMode(config) {
+            querySourceFeaturesForImageMode(config: config, cycleId: cycleId, queryStartTime: queryStartTime)
+            return
+        }
+
         let screenBounds = mapView.bounds
 
         var filterString: String? = nil
@@ -484,6 +535,8 @@ class ViewLayerController {
 
             switch result {
             case .success(let queriedFeatures):
+                NSLog("[ViewLayerDebug] QUERY_COUNT layer=%@ symbolLayer=%@ rendered=%d",
+                      config.id, config.associatedSymbolLayerId ?? "(nil)", queriedFeatures.count)
                 // --- Image mode short-circuit: render to style images, skip ViewAnnotations ---
                 if self.isImageMode(config) {
                     self.handleImageModeFeatures(config: config, queriedFeatures: queriedFeatures, cycleId: cycleId)
@@ -651,6 +704,41 @@ class ViewLayerController {
         }
     }
 
+    /// Queries source features for image-mode layers. Bypasses the chicken-
+    /// and-egg in queryRenderedFeatures (where un-rendered symbols don't
+    /// appear so their icons never register).
+    private func querySourceFeaturesForImageMode(config: ViewLayerConfig, cycleId: UInt64, queryStartTime: CFTimeInterval) {
+        let perfMonitor = ViewLayerPerfMonitor.shared
+        let sourceLayerIds: [String]? = config.sourceLayer.map { [$0] }
+        // Always-true filter — source-feature queries require a non-optional
+        // filter expression.
+        let sourceOptions = MapboxMaps.SourceQueryOptions(sourceLayerIds: sourceLayerIds, filter: true)
+
+        mapView.mapboxMap.querySourceFeatures(for: config.sourceId, options: sourceOptions) { [weak self] result in
+            guard let self = self else { return }
+            let queryMs = (CACurrentMediaTime() - queryStartTime) * 1000
+            perfMonitor.endOperation("queryRenderedFeatures:\(config.id)")
+            perfMonitor.recordQueryTime(queryMs)
+
+            switch result {
+            case .success(let sourceFeatures):
+                // sourceFeatures is whatever is loaded in the source tiles —
+                // can include features outside the viewport. The downstream
+                // maxVisibleAnnotations cap + the symbol layer's own
+                // viewport-based collision keep the on-screen behavior sane.
+                let features = sourceFeatures.map { $0.queriedFeature.feature }
+                NSLog("[ViewLayerDebug] QUERY_COUNT layer=%@ symbolLayer=%@ rendered=%d source=%d",
+                      config.id, config.associatedSymbolLayerId ?? "(nil)",
+                      0, features.count)
+                self.handleImageModeFeatures(config: config, features: features, cycleId: cycleId)
+
+            case .failure(let error):
+                NSLog("[ViewLayerPerf] QUERY_ERROR layer=%@ queryMs=%.1f error=%@ (source-query path)",
+                      config.id, queryMs, error.localizedDescription)
+            }
+        }
+    }
+
     /// Gets the feature ID for annotation tracking.
     /// - Parameters:
     ///   - feature: The map feature
@@ -722,8 +810,21 @@ class ViewLayerController {
         }
     }
 
-    // MARK: - Phase 1: Data extraction (cheap, synchronous)
+    /// Convenience: extract raw Features from a rendered-feature query and
+    /// forward to the main impl. Used by the legacy non-source query path.
     private func handleImageModeFeatures(config: ViewLayerConfig, queriedFeatures: [MapboxMaps.QueriedRenderedFeature], cycleId: UInt64) {
+        let features = queriedFeatures.compactMap { qrf -> MapboxMaps.Feature? in
+            guard qrf.queriedFeature.source == config.sourceId else { return nil }
+            if let sourceLayer = config.sourceLayer {
+                guard qrf.queriedFeature.sourceLayer == sourceLayer else { return nil }
+            }
+            return qrf.queriedFeature.feature
+        }
+        handleImageModeFeatures(config: config, features: features, cycleId: cycleId)
+    }
+
+    // MARK: - Phase 1: Data extraction (cheap, synchronous)
+    private func handleImageModeFeatures(config: ViewLayerConfig, features: [MapboxMaps.Feature], cycleId: UInt64) {
         guard let symbolLayerId = config.associatedSymbolLayerId else { return }
         let effectiveKeys = getEffectiveKeys(config)
         let useFeatureIds = effectiveKeys == nil
@@ -740,13 +841,13 @@ class ViewLayerController {
         var pendingItems: [PendingImageRender] = []
         var currentCycleMapping: [String: String] = [:]  // featureId → imageName (for hash-based match expression)
 
-        for queriedFeature in queriedFeatures {
-            guard queriedFeature.queriedFeature.source == config.sourceId else { continue }
-            if let sourceLayer = config.sourceLayer {
-                guard queriedFeature.queriedFeature.sourceLayer == sourceLayer else { continue }
-            }
+        // One-shot diagnostic: log the cache key we'd compute for the first
+        // visible feature plus its raw properties. Lets us spot any mismatch
+        // between what we register and what Mapbox would compute via its
+        // icon-image concat expression.
+        var diagnosticEmitted = false
 
-            let feature = queriedFeature.queriedFeature.feature
+        for feature in features {
 
             // Build data from property mapping
             var viewData: [String: Any] = [:]
@@ -780,12 +881,92 @@ class ViewLayerController {
                 cacheKey = viewAnnotationController.computeImageCacheKey(layoutName: config.layoutName, data: viewData, keys: effectiveKeys!.dataKeys)
             }
 
+            if !diagnosticEmitted {
+                diagnosticEmitted = true
+
+                // Symbol-layer state diagnostic: what does Mapbox actually have
+                // set for icon-image, icon-opacity, and visibility right now?
+                // If pins are blank despite cache keys matching, the issue is
+                // almost certainly here.
+                let iconImageVal = (try? mapView.mapboxMap.layerProperty(for: symbolLayerId, property: "icon-image").value) ?? "<unreadable>"
+                let iconOpacityVal = (try? mapView.mapboxMap.layerProperty(for: symbolLayerId, property: "icon-opacity").value) ?? "<unreadable>"
+                let visibilityVal = (try? mapView.mapboxMap.layerProperty(for: symbolLayerId, property: "visibility").value) ?? "<unreadable>"
+                // Look up the feature-state "promoted" for this exact feature.
+                // If it's true, this pin would render at opacity 0.
+                let rawFid = getFeatureIdString(feature) ?? "(none)"
+                let promotedCountForLayer = self.promotedFeatures.filter { $0.value.configId == config.id }.count
+                NSLog("[ViewLayerDebug] SYMBOL_STATE layer=%@ symbolLayer=%@ visibility=%@ iconImage=%@ iconOpacity=%@ featureId=%@ promotedCount=%d",
+                      config.id, symbolLayerId,
+                      String(describing: visibilityVal),
+                      String(describing: iconImageVal),
+                      String(describing: iconOpacityVal),
+                      rawFid,
+                      promotedCountForLayer)
+
+                if let keys = effectiveKeys?.dataKeys {
+                    // What the SDK registers under (data-dict-derived).
+                    var dataValuePairs: [String] = []
+                    for k in keys { dataValuePairs.append("\(k)=\(viewData[k].map { "\($0)" } ?? "nil")") }
+                    // What Mapbox's icon-image concat would compute by reading
+                    // raw feature properties — bypassing any propertyMapping
+                    // transform.
+                    var rawValuePairs: [String] = []
+                    var rawConcatParts: [String] = [config.layoutName]
+                    for k in keys {
+                        var raw: String = "(missing)"
+                        if let props = feature.properties, let v = props[k] {
+                            switch v {
+                            case .string(let s): raw = s
+                            case .number(let n): raw = "\(n)"
+                            case .boolean(let b): raw = "\(b)"
+                            default: raw = "\(v)"
+                            }
+                        }
+                        rawValuePairs.append("\(k)=\(raw)")
+                        rawConcatParts.append(raw)
+                    }
+                    let rawConcatResult = rawConcatParts.joined(separator: "_")
+                    let match = rawConcatResult == cacheKey ? "MATCH" : "MISMATCH"
+                    NSLog("[ViewLayerDebug] EXPR_DIAG layer=%@ %@ regKey=%@ lookupKey=%@ data=[%@] raw=[%@]",
+                          config.id, match, cacheKey, rawConcatResult,
+                          dataValuePairs.joined(separator: ","),
+                          rawValuePairs.joined(separator: ","))
+                }
+            }
+
             if existingImages.contains(cacheKey) {
                 if mapView.mapboxMap.imageExists(withId: cacheKey) {
                     continue
                 }
+                // Mapbox evicted the image silently. Try a synchronous re-register
+                // from our UIImage backup first — that avoids waiting on the factory
+                // (and any network fetch it would do for friend avatars), which is
+                // the difference between a 1-frame blip and a 5-second gap with the
+                // pin showing only the underlying circle.
+                if let cachedImage = registeredImageCache[config.id]?[cacheKey] {
+                    do {
+                        try mapView.mapboxMap.addImage(cachedImage, id: cacheKey, sdf: false, stretchX: [], stretchY: [], content: nil)
+                        NSLog("[ViewLayerDebug] STALE_REREGISTERED cacheKey=%@ — sync re-added from UIImage cache", cacheKey)
+                        continue
+                    } catch {
+                        NSLog("[ViewLayerDebug] STALE_REREGISTER_FAIL cacheKey=%@ error=%@ — falling through to factory", cacheKey, error.localizedDescription)
+                    }
+                }
                 existingImages.remove(cacheKey)
                 NSLog("[ViewLayerDebug] STYLE_IMAGE_STALE cacheKey=%@ — tracked but missing from style, will re-register", cacheKey)
+            } else if let cachedImage = registeredImageCache[config.id]?[cacheKey] {
+                // Layer was removed and re-added (typical Sortd filter/theme flow)
+                // so registeredStyleImages is empty for this cycle, but we still
+                // have the rendered UIImage in our cache. Restore it instantly
+                // instead of round-tripping through the factory and the network.
+                do {
+                    try mapView.mapboxMap.addImage(cachedImage, id: cacheKey, sdf: false, stretchX: [], stretchY: [], content: nil)
+                    existingImages.insert(cacheKey)
+                    NSLog("[ViewLayerDebug] CACHE_RESTORED cacheKey=%@ — layer re-add hydrated from UIImage cache", cacheKey)
+                    continue
+                } catch {
+                    NSLog("[ViewLayerDebug] CACHE_RESTORE_FAIL cacheKey=%@ error=%@ — falling through to factory", cacheKey, error.localizedDescription)
+                }
             }
 
             // Check for duplicates within this batch
@@ -897,19 +1078,37 @@ class ViewLayerController {
         let useFeatureIds = effectiveKeys == nil
         var existingImages = registeredStyleImages[config.id] ?? []
         var newImagesCount = 0
+        var newBytes = 0
+        var batchByteTotal = 0
 
         for result in pendingImageResults {
+            // Approximate pixel byte cost. `cgImage.bytesPerRow * height` is
+            // the actual buffer Mapbox copies; falls back to size×scale²×4 if
+            // cgImage is unavailable.
+            let pixelBytes: Int
+            if let cg = result.image.cgImage {
+                pixelBytes = cg.bytesPerRow * cg.height
+            } else {
+                let s = result.image.scale
+                let w = result.image.size.width * s
+                let h = result.image.size.height * s
+                pixelBytes = Int(w * h * 4)
+            }
+            batchByteTotal += pixelBytes
             do {
                 try mapView.mapboxMap.addImage(result.image, id: result.cacheKey, sdf: false, stretchX: [], stretchY: [], content: nil)
                 existingImages.insert(result.cacheKey)
+                registeredImageCache[config.id, default: [:]][result.cacheKey] = result.image
                 newImagesCount += 1
-                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTERED cacheKey=%@ size=%.0fx%.0f", result.cacheKey, result.image.size.width, result.image.size.height)
+                newBytes += pixelBytes
+                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTERED cacheKey=%@ size=%.0fx%.0f pixelBytes=%d", result.cacheKey, result.image.size.width, result.image.size.height, pixelBytes)
             } catch {
-                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTER_FAIL cacheKey=%@ error=%@", result.cacheKey, error.localizedDescription)
+                NSLog("[ViewLayerPerf] STYLE_IMAGE_REGISTER_FAIL cacheKey=%@ pixelBytes=%d error=%@", result.cacheKey, pixelBytes, error.localizedDescription)
             }
         }
 
         registeredStyleImages[config.id] = existingImages
+        registeredStyleImageBytes[config.id, default: 0] += newBytes
 
         if useFeatureIds {
             // Re-set match expression to force renderer to pick up newly registered images
@@ -928,7 +1127,11 @@ class ViewLayerController {
         }
         revealImageModeLayerIfNeeded(config: config, symbolLayerId: symbolLayerId)
 
-        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=%d totalImages=%d", config.id, newImagesCount, existingImages.count)
+        let cumulativeBytes = registeredStyleImageBytes[config.id] ?? 0
+        let availableMem = Int64(os_proc_available_memory())
+        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=%d totalImages=%d newKB=%d totalKB=%d availMemMB=%lld",
+              config.id, newImagesCount, existingImages.count,
+              newBytes / 1024, cumulativeBytes / 1024, availableMem / (1024 * 1024))
 
         // Clear batch state
         pendingImageResults.removeAll()
@@ -1373,6 +1576,11 @@ class ViewLayerController {
             }
             registeredStyleImages.removeValue(forKey: layerId)
         }
+        // Intentionally NOT clearing registeredImageCache here. Sortd-style apps
+        // remove + re-add the same layer id whenever a filter or theme changes,
+        // and the user-visible blackout that causes is exactly what the cache is
+        // here to prevent. The cache survives layer churn; the only path that
+        // wipes it is full controller reset (line ~1500).
 
         // Clean up feature-to-image mapping
         imageModeFeatureMapping.removeValue(forKey: layerId)
@@ -1441,6 +1649,7 @@ class ViewLayerController {
         pendingCreations.removeAll()
         recentlyRemoved.removeAll()
         registeredStyleImages.removeAll()
+        registeredImageCache.removeAll()
         imageModeExpressionSet.removeAll()
         imageModeInitialBatchDone.removeAll()
         promotedFeatures.removeAll()
