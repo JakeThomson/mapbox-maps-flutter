@@ -37,6 +37,7 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'full_map_example.dart';
 import 'location_example.dart';
 import 'example.dart';
+import 'map_texture_example.dart';
 import 'point_annotations_example.dart';
 import 'projection_example.dart';
 import 'style_example.dart';
@@ -51,6 +52,7 @@ final List<Example> _allPages = <Example>[
   ViewLayerExample(),
   ViewLayerSymbolBindingExample(),
   ViewLayerGeoJsonExample(),
+  MapTextureExample(),
   ViewportExample(),
   SnapshotterExample(),
   TrafficRouteLineExample(),
