@@ -38,6 +38,7 @@ import 'full_map_example.dart';
 import 'location_example.dart';
 import 'example.dart';
 import 'map_texture_example.dart';
+import 'map_texture_perf_example.dart';
 import 'point_annotations_example.dart';
 import 'projection_example.dart';
 import 'style_example.dart';
@@ -53,6 +54,7 @@ final List<Example> _allPages = <Example>[
   ViewLayerSymbolBindingExample(),
   ViewLayerGeoJsonExample(),
   MapTextureExample(),
+  MapTexturePerfExample(),
   ViewportExample(),
   SnapshotterExample(),
   TrafficRouteLineExample(),
