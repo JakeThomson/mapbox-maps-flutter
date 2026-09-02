@@ -493,7 +493,7 @@ class ViewLayerController(
                     val imageModeBranch = isImageMode(config)
                     Log.d(TAG, "queryFeatures BRANCH_DECISION | layer=${config.id} useImageMode=${config.useImageMode} imageCacheKeys=${config.imageCacheKeys} takingImageModePath=$imageModeBranch")
                     if (imageModeBranch) {
-                        handleImageModeFeatures(config, queriedRenderedFeatures)
+                        handleImageModeRenderedFeatures(config, queriedRenderedFeatures)
                         return@let
                     }
 
@@ -668,8 +668,12 @@ class ViewLayerController(
     /**
      * Convenience: extract raw Features from a rendered-feature query and
      * forward to the main impl. Used by the legacy non-source query path.
+     *
+     * Named distinctly rather than overloaded: `List<QueriedRenderedFeature>`
+     * and `List<Feature>` erase to the same JVM signature, and the Kotlin
+     * compiler rejects the pair as a platform declaration clash.
      */
-    private fun handleImageModeFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
+    private fun handleImageModeRenderedFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
         val features = queriedRenderedFeatures.mapNotNull { queriedRendered ->
             val queriedFeature = queriedRendered.queriedFeature
             if (queriedFeature.source != config.sourceId) return@mapNotNull null
