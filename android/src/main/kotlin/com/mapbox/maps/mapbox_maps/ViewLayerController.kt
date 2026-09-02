@@ -445,6 +445,18 @@ class ViewLayerController(
             val queryStartTime = SystemClock.elapsedRealtime()
             Log.d(TAG, "ViewLayerController: queryFeatures START | layer=${config.id}")
 
+            // Image-mode layers go through querySourceFeatures so we see every
+            // feature in the loaded tiles, not just the ones that are currently
+            // rendered. queryRenderedFeatures has a chicken-and-egg problem with
+            // symbols whose icon-image expression resolves to a yet-unregistered
+            // cache key AND whose text-field renders nothing — the symbol is
+            // invisible, queryRenderedFeatures skips it, the icon never registers,
+            // and the pin stays blank forever. Mirrors the iOS controller.
+            if (isImageMode(config)) {
+                querySourceFeaturesForImageMode(config, queryStartTime)
+                return
+            }
+
             // Convert filter list to JSON string for pigeon RenderedQueryOptions
             val filterString: String? = config.filter?.let {
                 JSONArray(it).toString()
@@ -622,8 +634,53 @@ class ViewLayerController(
 
     // region Image mode (style image rendering)
 
-    // region Phase 1: Data extraction (cheap, synchronous)
+    /**
+     * Queries source features for image-mode layers. Bypasses the chicken-
+     * and-egg in queryRenderedFeatures (where un-rendered symbols don't
+     * appear so their icons never register).
+     */
+    private fun querySourceFeaturesForImageMode(config: ViewLayerConfig, queryStartTime: Long) {
+        val sourceLayerIds: List<String>? = config.sourceLayer?.let { listOf(it) }
+        // Always-true filter — source-feature queries require a non-optional
+        // filter expression.
+        val options = com.mapbox.maps.SourceQueryOptions(
+            sourceLayerIds,
+            com.mapbox.bindgen.Value.valueOf(true)
+        )
+
+        mapboxMap.querySourceFeatures(config.sourceId, options) { expected ->
+            val queryDuration = SystemClock.elapsedRealtime() - queryStartTime
+
+            if (expected.isError) {
+                Log.w(TAG, "ViewLayerController: queryFeatures ERROR | layer=${config.id}, duration=${queryDuration}ms, error=${expected.error} (source-query path)")
+                return@querySourceFeatures
+            }
+
+            // Whatever is loaded in the source tiles — can include features
+            // outside the viewport. The symbol layer's own viewport-based
+            // collision keeps the on-screen behavior sane.
+            val features = expected.value?.map { it.queriedFeature.feature } ?: emptyList()
+            Log.d(TAG, "QUERY_COUNT layer=${config.id} symbolLayer=${config.associatedSymbolLayerId ?: "(nil)"} rendered=0 source=${features.size} queryMs=$queryDuration")
+            handleImageModeFeatures(config, features)
+        }
+    }
+
+    /**
+     * Convenience: extract raw Features from a rendered-feature query and
+     * forward to the main impl. Used by the legacy non-source query path.
+     */
     private fun handleImageModeFeatures(config: ViewLayerConfig, queriedRenderedFeatures: List<com.mapbox.maps.QueriedRenderedFeature>) {
+        val features = queriedRenderedFeatures.mapNotNull { queriedRendered ->
+            val queriedFeature = queriedRendered.queriedFeature
+            if (queriedFeature.source != config.sourceId) return@mapNotNull null
+            if (config.sourceLayer != null && queriedFeature.sourceLayer != config.sourceLayer) return@mapNotNull null
+            queriedFeature.feature
+        }
+        handleImageModeFeatures(config, features)
+    }
+
+    // region Phase 1: Data extraction (cheap, synchronous)
+    private fun handleImageModeFeatures(config: ViewLayerConfig, features: List<Feature>) {
         val symbolLayerId = config.associatedSymbolLayerId ?: return
         val effectiveKeys = getEffectiveKeys(config)
         val useFeatureIds = effectiveKeys == null
@@ -637,18 +694,12 @@ class ViewLayerController(
         }
 
         val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
-        Log.d(TAG, "handleImageMode START | layer=${config.id} useFeatureIds=$useFeatureIds existingImagesCount=${existingImages.size} queriedFeatures=${queriedRenderedFeatures.size}")
+        Log.d(TAG, "handleImageMode START | layer=${config.id} useFeatureIds=$useFeatureIds existingImagesCount=${existingImages.size} features=${features.size}")
 
         val pendingItems = mutableListOf<PendingImageRender>()
         val currentCycleMapping = mutableMapOf<String, String>()  // featureId → imageName (for hash-based match expression)
 
-        for (queriedRendered in queriedRenderedFeatures) {
-            val queriedFeature = queriedRendered.queriedFeature
-            if (queriedFeature.source != config.sourceId) continue
-            if (config.sourceLayer != null && queriedFeature.sourceLayer != config.sourceLayer) continue
-
-            val feature = queriedFeature.feature
-
+        for (feature in features) {
             // Build data from property mapping
             val viewData = mutableMapOf<String, Any?>()
             config.propertyMapping.forEach { (dataKey, mapping) ->
