@@ -143,9 +143,18 @@ class ViewLayerController(
             }
         })
         mapIdleCancelable = mapboxMap.subscribeMapIdle(MapIdleCallback {
+            // Cluster layers can gain/lose members without a camera move (a
+            // sibling source finishing a load, a promote/demote), so they need
+            // a query on idle too — but MapIdle fires on essentially every
+            // settled frame during a continuous pan/zoom, not just once a
+            // gesture ends. Routing through scheduleUpdate() shares the same
+            // 150ms debounce as the camera-changed path instead of bypassing
+            // it: calling updateVisibleFeatures() directly here fired the full
+            // 5-layer query fan-out dozens of times a second while dragging
+            // the map, which is what showed up as map lag.
             val hasClusterLayers = viewLayers.values.any { it.id.contains("cluster") }
             if (hasClusterLayers) {
-                updateVisibleFeatures()
+                scheduleUpdate()
             }
         })
     }
@@ -1121,28 +1130,40 @@ class ViewLayerController(
         }
 
         // Build match expression: ["match", ["to-string", ["id"]], "fid1", "img1", ..., ""]
-        val matchParts = mutableListOf<Any>()
-        matchParts.add("match")
-        matchParts.add(listOf("to-string", listOf("id")))
-        for ((fid, imgName) in layerMapping) {
-            matchParts.add(fid)
-            matchParts.add(imgName)
-        }
-        matchParts.add("")  // fallback
-
-        val matchJson = JSONArray(matchParts).toString()
-        val matchValue = com.mapbox.bindgen.Value.fromJson(matchJson)
-        if (matchValue.isError) {
-            Log.w(TAG, "HASH_EXPRESSION_PARSE_FAIL layer=${config.id} error=${matchValue.error}")
-            return
-        }
-
-        val result = mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-image", matchValue.value!!)
-        if (result?.isError == true) {
-            Log.w(TAG, "HASH_EXPRESSION_FAIL layer=${config.id} error=${result.error}")
+        // A `match` needs at least one case (input, one label/output pair,
+        // fallback), so with an empty mapping — nothing has ever been queried
+        // for this layer at the current view, e.g. an empty cluster layer at
+        // this zoom/location — the built expression is just the input plus
+        // the fallback and Mapbox's native validator rejects it every single
+        // cycle: "Expected at least 4 arguments, but found only 2". That cost
+        // a wasted style-property call and a warning log on every update with
+        // nothing to show for it, forever, for a layer with no features.
+        if (layerMapping.isEmpty()) {
+            Log.d(TAG, "HASH_EXPRESSION SKIPPED (empty mapping) | layer=${config.id}")
         } else {
-            imageModeExpressionSet.add(config.id)
-            Log.d(TAG, "HASH_EXPRESSION layer=${config.id} symbolLayer=$symbolLayerId mappingCount=${layerMapping.size}")
+            val matchParts = mutableListOf<Any>()
+            matchParts.add("match")
+            matchParts.add(listOf("to-string", listOf("id")))
+            for ((fid, imgName) in layerMapping) {
+                matchParts.add(fid)
+                matchParts.add(imgName)
+            }
+            matchParts.add("")  // fallback
+
+            val matchJson = JSONArray(matchParts).toString()
+            val matchValue = com.mapbox.bindgen.Value.fromJson(matchJson)
+            if (matchValue.isError) {
+                Log.w(TAG, "HASH_EXPRESSION_PARSE_FAIL layer=${config.id} error=${matchValue.error}")
+                return
+            }
+
+            val result = mapboxMap.getStyle()?.setStyleLayerProperty(symbolLayerId, "icon-image", matchValue.value!!)
+            if (result?.isError == true) {
+                Log.w(TAG, "HASH_EXPRESSION_FAIL layer=${config.id} error=${result.error}")
+            } else {
+                imageModeExpressionSet.add(config.id)
+                Log.d(TAG, "HASH_EXPRESSION layer=${config.id} symbolLayer=$symbolLayerId mappingCount=${layerMapping.size}")
+            }
         }
 
         // Set opacity expression for promote/demote (only once)
