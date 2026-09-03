@@ -100,6 +100,8 @@ class ViewLayerController(
     private val pendingImageResults = mutableListOf<RenderedImageResult>()
     private var isImageRenderBatchActive = false
     private val maxImageRendersPerFrame = 8
+    /** Cache keys currently being rendered on a factory thread, per layer id. */
+    private val inFlightImageKeys = mutableMapOf<String, MutableSet<String>>()
     private var activeImageBatchConfig: ViewLayerConfig? = null
     private var activeImageBatchSymbolLayerId: String? = null
 
@@ -815,6 +817,11 @@ class ViewLayerController(
             }
             if (existingImages.contains(cacheKey)) continue
             if (pendingItems.any { it.cacheKey == cacheKey }) continue
+            // A previous cycle's factory thread is still rendering this key.
+            // Re-dispatching it here spawned one more thread per cycle for the
+            // same slow render (a network-backed avatar), and the CDN then
+            // reset the pile of identical concurrent downloads.
+            if (inFlightImageKeys[config.id]?.contains(cacheKey) == true) continue
 
             val padding = (config.imageCachePadding ?: 0.0).toFloat()
             pendingItems.add(PendingImageRender(config, cacheKey, viewData, padding))
@@ -853,10 +860,13 @@ class ViewLayerController(
 
         // Fast path: if an image factory is registered, render ALL pending items on a background thread
         val config = activeImageBatchConfig
-        if (config != null && ViewAnnotationRegistry.hasImageFactory(config.layoutName)) {
+        val symbolLayerId = activeImageBatchSymbolLayerId
+        if (config != null && symbolLayerId != null && ViewAnnotationRegistry.hasImageFactory(config.layoutName)) {
             val allPending = ArrayList(pendingImageRenders)
             pendingImageRenders.clear()
             val density = mapView.context.resources.displayMetrics.density
+            val inFlight = inFlightImageKeys.getOrPut(config.id) { mutableSetOf() }
+            allPending.forEach { inFlight.add(it.cacheKey) }
 
             Log.d(TAG, "IMAGE_FACTORY_DISPATCH layer=${config.layoutName} count=${allPending.size}")
 
@@ -879,9 +889,20 @@ class ViewLayerController(
                 }
 
                 mainHandler.post {
-                    if (!isImageRenderBatchActive) return@post
-                    pendingImageResults.addAll(results)
-                    commitImageBatch()
+                    inFlightImageKeys[config.id]?.let { set -> allPending.forEach { set.remove(it.cacheKey) } }
+                    if (isImageRenderBatchActive && activeImageBatchConfig?.id == config.id) {
+                        pendingImageResults.addAll(results)
+                        commitImageBatch()
+                    } else if (results.isNotEmpty()) {
+                        // The batch was cancelled or another layer's batch took
+                        // over while these rendered. The bitmaps are still the
+                        // right image for their cache keys, so register them
+                        // rather than throw the work away — dropping them here
+                        // is what made a slow render (an avatar download) loop
+                        // forever without ever reaching the style.
+                        Log.d(TAG, "IMAGE_FACTORY_LATE_COMMIT layer=${config.id} count=${results.size}")
+                        registerRenderedImages(config, symbolLayerId, results)
+                    }
                 }
             }.start()
             return
@@ -924,11 +945,21 @@ class ViewLayerController(
         if (!isImageRenderBatchActive) return
         val config = activeImageBatchConfig ?: return
         val symbolLayerId = activeImageBatchSymbolLayerId ?: return
-        val effectiveKeys = getEffectiveKeys(config)
-        val useFeatureIds = effectiveKeys == null
 
         val results = ArrayList(pendingImageResults)
         pendingImageResults.clear()
+        registerRenderedImages(config, symbolLayerId, results)
+    }
+
+    /**
+     * Registers rendered bitmaps as style images for [config]'s symbol layer.
+     * Independent of the batch state: a result is valid for its cache key
+     * whether or not the batch that produced it is still the active one. Only
+     * the batch bookkeeping at the end is conditional on that.
+     */
+    private fun registerRenderedImages(config: ViewLayerConfig, symbolLayerId: String, results: List<RenderedImageResult>) {
+        val effectiveKeys = getEffectiveKeys(config)
+        val useFeatureIds = effectiveKeys == null
 
         // Move bitmap-to-ByteBuffer conversion to background thread
         Thread {
@@ -945,7 +976,7 @@ class ViewLayerController(
 
             // Post back to main thread for style registration
             mainHandler.post {
-                if (!isImageRenderBatchActive || activeImageBatchConfig?.id != config.id) return@post
+                val isActiveBatch = isImageRenderBatchActive && activeImageBatchConfig?.id == config.id
 
                 val existingImages = registeredStyleImages.getOrPut(config.id) { mutableSetOf() }
                 val scale = mapView.context.resources.displayMetrics.density
@@ -1004,12 +1035,15 @@ class ViewLayerController(
                     }
                 }
 
-                Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} newImages=$successCount attempted=${preparedImages.size} totalImages=${existingImages.size}")
+                Log.d(TAG, "IMAGE_MODE_BATCH layer=${config.id} newImages=$successCount attempted=${preparedImages.size} totalImages=${existingImages.size} activeBatch=$isActiveBatch")
 
-                // Clear batch state
-                isImageRenderBatchActive = false
-                activeImageBatchConfig = null
-                activeImageBatchSymbolLayerId = null
+                // Clear batch state — only if this is still the batch in flight;
+                // a late commit must not tear down a newer layer's batch.
+                if (isActiveBatch) {
+                    isImageRenderBatchActive = false
+                    activeImageBatchConfig = null
+                    activeImageBatchSymbolLayerId = null
+                }
             }
         }.start()
     }
