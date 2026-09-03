@@ -62,6 +62,7 @@ class ViewLayerController(
     companion object {
         private const val DEBOUNCE_DELAY_MS = 150L
         private const val TAG = "ViewLayerPerf"
+        private const val DEBUG_TAG = "ViewLayerDebug"
     }
 
     private val viewLayers = mutableMapOf<String, ViewLayerConfig>()
@@ -357,6 +358,87 @@ class ViewLayerController(
 
     private fun isImageMode(config: ViewLayerConfig): Boolean =
         config.useImageMode || config.imageCacheKeys != null
+
+    /**
+     * A feature property as a plain Kotlin value, or null when absent or JSON
+     * null. Gson's `JsonNull.asString` THROWS (UnsupportedOperationException),
+     * so reading it directly took down the whole image batch on the first
+     * feature carrying a null property. Strings come back as strings; every
+     * other primitive keeps its JsonPrimitive so the cache-key normaliser can
+     * still fold whole-number doubles.
+     */
+    private fun propertyValue(feature: Feature, propKey: String): Any? {
+        val value = feature.getProperty(propKey) ?: return null
+        if (value.isJsonNull) return null
+        if (value.isJsonPrimitive) {
+            val prim = value.asJsonPrimitive
+            return if (prim.isString) prim.asString else prim
+        }
+        return value.toString()
+    }
+
+    /**
+     * What Mapbox's `icon-image` concat expression computes for [feature] from
+     * its RAW properties — `to-string` of a missing or null property is "".
+     * Mirrors `normalizeValueForCacheKey`'s number folding so a match is a
+     * real match. Diagnostic only; see [logImageModeDiagnostic].
+     */
+    private fun rawConcatKey(config: ViewLayerConfig, feature: Feature, keys: List<String>): String {
+        val parts = mutableListOf(config.layoutName)
+        for (k in keys) {
+            val v = feature.getProperty(k)
+            parts.add(
+                when {
+                    v == null || v.isJsonNull -> ""
+                    v.isJsonPrimitive && v.asJsonPrimitive.isString -> v.asString
+                    else -> {
+                        val str = v.toString()
+                        val d = str.toDoubleOrNull()
+                        if (d != null && d == Math.floor(d) && !d.isInfinite()) d.toLong().toString() else str
+                    }
+                }
+            )
+        }
+        return parts.joinToString("_")
+    }
+
+    /**
+     * Once per image-mode cycle: the symbol layer's live `icon-image`,
+     * `icon-opacity` and `visibility`, plus whether the key the SDK registers a
+     * bitmap under equals the key Mapbox will look up. A MISMATCH here is the
+     * pin-stays-blank bug in one line. Port of the iOS `[ViewLayerDebug]`
+     * SYMBOL_STATE / EXPR_DIAG pair.
+     */
+    private fun logImageModeDiagnostic(
+        config: ViewLayerConfig,
+        symbolLayerId: String,
+        feature: Feature,
+        viewData: Map<String, Any?>,
+        cacheKey: String,
+        dataKeys: List<String>?
+    ) {
+        val style = mapboxMap.getStyle()
+        fun prop(name: String): String {
+            val p = style?.getStyleLayerProperty(symbolLayerId, name) ?: return "<unreadable>"
+            return p.value.toString()
+        }
+        val promotedCountForLayer = promotedFeatures.values.count { it.configId == config.id }
+        Log.d(
+            DEBUG_TAG,
+            "SYMBOL_STATE layer=${config.id} symbolLayer=$symbolLayerId visibility=${prop("visibility")} " +
+                "iconImage=${prop("icon-image")} iconOpacity=${prop("icon-opacity")} " +
+                "featureId=${feature.id() ?: "(none)"} promotedCount=$promotedCountForLayer"
+        )
+        if (dataKeys == null) return
+        val dataPairs = dataKeys.joinToString(",") { k -> "$k=${viewData[k] ?: "nil"}" }
+        val rawPairs = dataKeys.joinToString(",") { k ->
+            val v = feature.getProperty(k)
+            "$k=${if (v == null) "(missing)" else if (v.isJsonNull) "(null)" else if (v.isJsonPrimitive && v.asJsonPrimitive.isString) v.asString else v.toString()}"
+        }
+        val lookupKey = rawConcatKey(config, feature, dataKeys)
+        val match = if (lookupKey == cacheKey) "MATCH" else "MISMATCH"
+        Log.d(DEBUG_TAG, "EXPR_DIAG layer=${config.id} $match regKey=$cacheKey lookupKey=$lookupKey data=[$dataPairs] raw=[$rawPairs]")
+    }
 
     /**
      * Returns (dataKeys, expressionKeys) for property-based image cache keys.
@@ -702,6 +784,7 @@ class ViewLayerController(
 
         val pendingItems = mutableListOf<PendingImageRender>()
         val currentCycleMapping = mutableMapOf<String, String>()  // featureId → imageName (for hash-based match expression)
+        var diagnosticEmitted = false
 
         for (feature in features) {
             // Build data from property mapping
@@ -710,8 +793,7 @@ class ViewLayerController(
                 when (mapping.type) {
                     "feature" -> {
                         mapping.propertyKey?.let { propKey ->
-                            val value = feature.getProperty(propKey)
-                            viewData[dataKey] = value?.asString ?: value?.asJsonPrimitive
+                            viewData[dataKey] = propertyValue(feature, propKey)
                         }
                     }
                     "constant" -> viewData[dataKey] = mapping.value
@@ -726,6 +808,10 @@ class ViewLayerController(
                 currentCycleMapping[featureId] = cacheKey
             } else {
                 cacheKey = viewAnnotationController.computeImageCacheKey(config.layoutName, viewData, effectiveKeys!!.first)
+            }
+            if (!diagnosticEmitted) {
+                diagnosticEmitted = true
+                logImageModeDiagnostic(config, symbolLayerId, feature, viewData, cacheKey, effectiveKeys?.first)
             }
             if (existingImages.contains(cacheKey)) continue
             if (pendingItems.any { it.cacheKey == cacheKey }) continue
@@ -1168,8 +1254,7 @@ class ViewLayerController(
                 "feature" -> {
                     mapping.propertyKey?.let { propKey ->
                         // Get property from feature
-                        val value = feature.getProperty(propKey)
-                        viewData[dataKey] = value?.asString ?: value?.asJsonPrimitive
+                        viewData[dataKey] = propertyValue(feature, propKey)
                     }
                 }
                 "constant" -> {
