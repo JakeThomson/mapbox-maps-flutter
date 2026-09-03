@@ -69,6 +69,7 @@ class ViewLayerController(
     private val featureAnnotations = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of annotation IDs
     private val mainHandler = Handler(Looper.getMainLooper())
     private var updatePending = false
+    private var sourceDataUpdatePending = false  // coalesces a burst of sourceDataLoaded events into one 400ms update
     private val visibleFeatureIds = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of feature IDs
 
     // Time-based grace period
@@ -136,10 +137,26 @@ class ViewLayerController(
             val sourceId = event.sourceId
             val hasAffectedLayers = viewLayers.values.any { it.sourceId == sourceId }
             if (hasAffectedLayers) {
-                Log.d(TAG, "ViewLayerController: sourceDataLoaded | source=$sourceId, type=${event.type}, scheduling delayed update (400ms)")
-                mainHandler.postDelayed({
-                    updateVisibleFeatures()
-                }, 400L)
+                // Loading the tiles for one viewport commonly fires several of
+                // these in a burst — one per tile, sometimes one per source
+                // too — and each used to schedule its OWN independent 400ms
+                // postDelayed with no coalescing between them. A burst of
+                // eight or ten arriving within a few ms therefore queued eight
+                // or ten separate calls to the full 5-layer query fan-out,
+                // landing together ~400ms later: the same runaway-update
+                // pattern as the map-idle bypass above, from a second,
+                // independent path. sourceDataUpdatePending collapses a whole
+                // burst into the one update its last member actually needs.
+                if (!sourceDataUpdatePending) {
+                    sourceDataUpdatePending = true
+                    Log.d(TAG, "ViewLayerController: sourceDataLoaded | source=$sourceId, type=${event.type}, scheduling delayed update (400ms)")
+                    mainHandler.postDelayed({
+                        sourceDataUpdatePending = false
+                        updateVisibleFeatures()
+                    }, 400L)
+                } else {
+                    Log.d(TAG, "ViewLayerController: sourceDataLoaded SKIPPED | source=$sourceId, type=${event.type}, already pending")
+                }
             }
         })
         mapIdleCancelable = mapboxMap.subscribeMapIdle(MapIdleCallback {
