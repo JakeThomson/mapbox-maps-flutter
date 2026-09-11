@@ -94,6 +94,8 @@ class ViewLayerController {
     private let maxImageRendersPerFrame = 5
     private var activeImageBatchConfig: ViewLayerConfig? = nil
     private var activeImageBatchSymbolLayerId: String? = nil
+    /// Cache keys currently being rendered on a factory thread, per layer id.
+    private var inFlightImageKeys: [String: Set<String>] = [:]
 
     // Churn detection
     private var recentlyRemoved: [String: [String: CFTimeInterval]] = [:]  // layerId -> featureId -> remove time
@@ -972,6 +974,15 @@ class ViewLayerController {
             // Check for duplicates within this batch
             if pendingItems.contains(where: { $0.cacheKey == cacheKey }) { continue }
 
+            // A previous cycle's factory thread is still rendering this key.
+            // Re-dispatching it here spawned one more background render of the
+            // whole layer per query cycle — every ~240ms on a busy map — none
+            // of which finished before the next was queued. 404 pins × 37
+            // cycles in 11s held thousands of UIImages in flight and took an
+            // iPhone 15 through its 3 GB watermark (2026-09-11), with not one
+            // image reaching the style. Same fix as Android (e94f1a2).
+            if inFlightImageKeys[config.id]?.contains(cacheKey) == true { continue }
+
             let padding = CGFloat(config.imageCachePadding ?? 0)
             pendingItems.append(PendingImageRender(config: config, cacheKey: cacheKey, viewData: viewData, padding: padding))
         }
@@ -1009,10 +1020,12 @@ class ViewLayerController {
 
         // Fast path: if an image factory is registered, render ALL pending items on a background thread
         if let config = activeImageBatchConfig,
+           let symbolLayerId = activeImageBatchSymbolLayerId,
            ViewAnnotationRegistry.shared.hasImageFactory(for: config.layoutName) {
             let allPending = pendingImageRenders
             pendingImageRenders.removeAll()
             let scale = UIScreen.main.scale  // Capture on main thread before background dispatch
+            inFlightImageKeys[config.id, default: []].formUnion(allPending.map { $0.cacheKey })
 
             NSLog("[ViewLayerPerf] IMAGE_FACTORY_DISPATCH layer=%@ count=%d", config.layoutName, allPending.count)
 
@@ -1035,9 +1048,21 @@ class ViewLayerController {
                 }
 
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.isImageRenderBatchActive else { return }
-                    self.pendingImageResults.append(contentsOf: results)
-                    self.commitImageBatch()
+                    guard let self = self else { return }
+                    self.inFlightImageKeys[config.id]?.subtract(allPending.map { $0.cacheKey })
+                    if self.isImageRenderBatchActive && self.activeImageBatchConfig?.id == config.id {
+                        self.pendingImageResults.append(contentsOf: results)
+                        self.commitImageBatch()
+                    } else if !results.isEmpty {
+                        // The batch was cancelled or another layer's batch took
+                        // over while these rendered. The images are still the
+                        // right picture for their cache keys, so register them
+                        // rather than throw the work away — dropping them here
+                        // is what made a slow render loop forever without ever
+                        // reaching the style.
+                        NSLog("[ViewLayerPerf] IMAGE_FACTORY_LATE_COMMIT layer=%@ count=%d", config.id, results.count)
+                        self.registerRenderedImages(config: config, symbolLayerId: symbolLayerId, results: results)
+                    }
                 }
             }
             return
@@ -1073,7 +1098,16 @@ class ViewLayerController {
               let symbolLayerId = activeImageBatchSymbolLayerId else {
             return
         }
+        let results = pendingImageResults
+        pendingImageResults.removeAll()
+        registerRenderedImages(config: config, symbolLayerId: symbolLayerId, results: results)
+    }
 
+    /// Registers rendered images as style images for `config`'s symbol layer.
+    /// Independent of the batch state: a result is valid for its cache key
+    /// whether or not the batch that produced it is still the active one. Only
+    /// the batch bookkeeping at the end is conditional on that.
+    private func registerRenderedImages(config: ViewLayerConfig, symbolLayerId: String, results: [(cacheKey: String, image: UIImage)]) {
         let effectiveKeys = getEffectiveKeys(config)
         let useFeatureIds = effectiveKeys == nil
         var existingImages = registeredStyleImages[config.id] ?? []
@@ -1081,7 +1115,7 @@ class ViewLayerController {
         var newBytes = 0
         var batchByteTotal = 0
 
-        for result in pendingImageResults {
+        for result in results {
             // Approximate pixel byte cost. `cgImage.bytesPerRow * height` is
             // the actual buffer Mapbox copies; falls back to size×scale²×4 if
             // cgImage is unavailable.
@@ -1129,15 +1163,19 @@ class ViewLayerController {
 
         let cumulativeBytes = registeredStyleImageBytes[config.id] ?? 0
         let availableMem = Int64(os_proc_available_memory())
-        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=%d totalImages=%d newKB=%d totalKB=%d availMemMB=%lld",
+        let isActiveBatch = isImageRenderBatchActive && activeImageBatchConfig?.id == config.id
+        NSLog("[ViewLayerPerf] IMAGE_MODE_BATCH layer=%@ newImages=%d totalImages=%d newKB=%d totalKB=%d availMemMB=%lld activeBatch=%d",
               config.id, newImagesCount, existingImages.count,
-              newBytes / 1024, cumulativeBytes / 1024, availableMem / (1024 * 1024))
+              newBytes / 1024, cumulativeBytes / 1024, availableMem / (1024 * 1024), isActiveBatch ? 1 : 0)
 
-        // Clear batch state
-        pendingImageResults.removeAll()
-        isImageRenderBatchActive = false
-        activeImageBatchConfig = nil
-        activeImageBatchSymbolLayerId = nil
+        // Clear batch state — only if this is still the batch in flight; a
+        // late commit must not tear down a newer layer's batch.
+        if isActiveBatch {
+            pendingImageResults.removeAll()
+            isImageRenderBatchActive = false
+            activeImageBatchConfig = nil
+            activeImageBatchSymbolLayerId = nil
+        }
     }
 
     // MARK: - Image mode helpers
