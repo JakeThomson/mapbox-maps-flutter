@@ -61,6 +61,9 @@ class ViewLayerController(
 ) {
     companion object {
         private const val DEBOUNCE_DELAY_MS = 150L
+        // A query cycle whose callbacks have not all returned after this long
+        // is treated as lost rather than left to block every later update.
+        private const val CYCLE_STALL_MS = 3000L
         private const val TAG = "ViewLayerPerf"
         private const val DEBUG_TAG = "ViewLayerDebug"
     }
@@ -70,6 +73,24 @@ class ViewLayerController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var updatePending = false
     private var sourceDataUpdatePending = false  // coalesces a burst of sourceDataLoaded events into one 400ms update
+
+    // One cycle at a time. Camera-changed fires faster than the 5-layer query
+    // fan-out completes on a mid-range phone (each querySourceFeatures is
+    // queued behind rendering on the map thread), so with only the 150ms
+    // debounce a pan kept ~5 cycles a second in flight — 135s of query time
+    // in 130s of panning on a moto g34, and the map thread starved. A cycle
+    // now runs only once the previous one has fully returned; an update
+    // requested meanwhile is folded into a single follow-up.
+    private var queriesInFlight = 0
+    private var updateRequestedDuringCycle = false
+    private var cycleStartedAt = 0L
+
+    // Sources whose last source-feature query came back empty and that have
+    // reported no new data since. The two search layers sit empty until the
+    // user searches, and querying an empty source still costs a full trip
+    // through the map thread (~90ms each on a moto g34, 60% of every cycle),
+    // so they are skipped until sourceDataLoaded says there is something.
+    private val emptySources = mutableSetOf<String>()
     private val visibleFeatureIds = mutableMapOf<String, MutableSet<String>>() // layerId -> Set of feature IDs
 
     // Time-based grace period
@@ -135,6 +156,7 @@ class ViewLayerController(
         })
         sourceDataCancelable = mapboxMap.subscribeSourceDataLoaded(SourceDataLoadedCallback { event ->
             val sourceId = event.sourceId
+            emptySources.remove(sourceId)
             val hasAffectedLayers = viewLayers.values.any { it.sourceId == sourceId }
             if (hasAffectedLayers) {
                 // Loading the tiles for one viewport commonly fires several of
@@ -194,6 +216,7 @@ class ViewLayerController(
                 viewLayers[config.id] = config
                 featureAnnotations[config.id] = mutableSetOf()
                 visibleFeatureIds[config.id] = mutableSetOf()
+                emptySources.remove(config.sourceId)
 
                 // Register image-mode layer for tap fallback
                 if (isImageMode(config) && config.associatedSymbolLayerId != null) {
@@ -266,6 +289,7 @@ class ViewLayerController(
                 }
 
                 viewLayers[config.id] = config
+                emptySources.remove(config.sourceId)
                 scheduleUpdate()
 
                 reply.reply(emptyMap<String, Any>())
@@ -530,6 +554,18 @@ class ViewLayerController(
     }
 
     private fun updateVisibleFeatures() {
+        val now = SystemClock.elapsedRealtime()
+        if (queriesInFlight > 0 && now - cycleStartedAt < CYCLE_STALL_MS) {
+            updateRequestedDuringCycle = true
+            Log.d(TAG, "ViewLayerController: updateVisibleFeatures DEFERRED | $queriesInFlight queries still in flight")
+            return
+        }
+        if (queriesInFlight > 0) {
+            Log.w(TAG, "ViewLayerController: updateVisibleFeatures STALLED CYCLE | $queriesInFlight queries never returned after ${now - cycleStartedAt}ms, starting a new cycle")
+        }
+        queriesInFlight = 0
+        updateRequestedDuringCycle = false
+        cycleStartedAt = now
         val currentZoom = mapboxMap.cameraState.zoom
         Log.d(TAG, "ViewLayerController: updateVisibleFeatures START | zoom=%.2f, layers=${viewLayers.size}".format(currentZoom))
 
@@ -563,6 +599,11 @@ class ViewLayerController(
             // invisible, queryRenderedFeatures skips it, the icon never registers,
             // and the pin stays blank forever. Mirrors the iOS controller.
             if (isImageMode(config)) {
+                if (config.sourceId in emptySources) {
+                    Log.d(TAG, "QUERY_SKIPPED (source empty) | layer=${config.id} source=${config.sourceId}")
+                    return
+                }
+                queriesInFlight++
                 querySourceFeaturesForImageMode(config, queryStartTime)
                 return
             }
@@ -587,10 +628,12 @@ class ViewLayerController(
                 )
             )
 
+            queriesInFlight++
             mapboxMap.queryRenderedFeatures(
                 RenderedQueryGeometry.valueOf(screenBox),
                 options
             ) { expected ->
+                onQueryFinished()
                 val queryDuration = SystemClock.elapsedRealtime() - queryStartTime
 
                 if (expected.isError) {
@@ -742,6 +785,21 @@ class ViewLayerController(
         }
     }
 
+    /**
+     * Called from every query callback. When the cycle's last query returns
+     * and an update was asked for in the meantime, one follow-up is scheduled
+     * — through the normal debounce, so a pan that is still going gets one
+     * cycle per settle rather than one per callback.
+     */
+    private fun onQueryFinished() {
+        if (queriesInFlight > 0) queriesInFlight--
+        if (queriesInFlight == 0 && updateRequestedDuringCycle) {
+            updateRequestedDuringCycle = false
+            Log.d(TAG, "ViewLayerController: cycle complete, running the update requested during it")
+            scheduleUpdate()
+        }
+    }
+
     // region Image mode (style image rendering)
 
     /**
@@ -759,6 +817,7 @@ class ViewLayerController(
         )
 
         mapboxMap.querySourceFeatures(config.sourceId, options) { expected ->
+            onQueryFinished()
             val queryDuration = SystemClock.elapsedRealtime() - queryStartTime
 
             if (expected.isError) {
@@ -770,6 +829,7 @@ class ViewLayerController(
             // outside the viewport. The symbol layer's own viewport-based
             // collision keeps the on-screen behavior sane.
             val features = expected.value?.map { it.queriedFeature.feature } ?: emptyList()
+            if (features.isEmpty()) emptySources.add(config.sourceId) else emptySources.remove(config.sourceId)
             Log.d(TAG, "QUERY_COUNT layer=${config.id} symbolLayer=${config.associatedSymbolLayerId ?: "(nil)"} rendered=0 source=${features.size} queryMs=$queryDuration")
             handleImageModeFeatures(config, features)
         }
@@ -1627,6 +1687,9 @@ class ViewLayerController(
         registeredStyleImages.clear()
         imageModeExpressionSet.clear()
         imageModeInitialBatchDone.clear()
+        emptySources.clear()
+        queriesInFlight = 0
+        updateRequestedDuringCycle = false
         promotedFeatures.clear()
         opacityExpressionSet.clear()
     }
