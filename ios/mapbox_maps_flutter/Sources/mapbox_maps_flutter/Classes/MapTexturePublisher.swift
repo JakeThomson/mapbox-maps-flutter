@@ -1,6 +1,7 @@
 import Flutter
 import MetalKit
 import ObjectiveC.runtime
+import UIKit
 
 /// Publishes an `MTKView`'s frames as a flutter texture.
 ///
@@ -44,6 +45,19 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     private let lock = NSLock()
     private var latest: CVPixelBuffer?
 
+    // MARK: - Overlay state
+    //
+    // See "UIKit content" below.
+
+    private var overlayLink: CADisplayLink?
+    /// What the last raster was of, so an overlay that has not moved is not
+    /// rasterised again.
+    private var overlaySignature: [CGRect] = []
+    private var overlayTexture: MTLTexture?
+    private var overlayRect: CGRect = .zero
+    private var overlayPipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
+    private let overlayLock = NSLock()
+
     init(mapView: UIView, textures: FlutterTextureRegistry) {
         self.mapView = mapView
         self.textures = textures
@@ -59,11 +73,15 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         guard let layer = mtk.layer as? CAMetalLayer else { return -1 }
         Self.registry.setObject(self, forKey: layer)
         Self.hookPresentIfNeeded(device: mtk.device)
+        startOverlayLink()
         textureId = textures.register(self)
         return textureId
     }
 
     func stop() {
+        overlayLink?.invalidate()
+        overlayLink = nil
+        overlayTexture = nil
         if let layer = mtkView?.layer as? CAMetalLayer {
             Self.registry.removeObject(forKey: layer)
         }
@@ -126,6 +144,7 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
                   to: entry.texture, destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
+        compositeOverlay(onto: entry.texture, commandBuffer: commandBuffer)
         commandBuffer.addCompletedHandler { [weak self] _ in
             guard let self, self.textureId >= 0 else { return }
             self.lock.lock()
@@ -187,6 +206,228 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
               let cvTexture = metalTexture,
               let texture = CVMetalTextureGetTexture(cvTexture) else { return nil }
         return Entry(buffer: buffer, cvTexture: cvTexture, texture: texture)
+    }
+
+    // MARK: - UIKit content
+    //
+    // Everything the map shows that UIKit draws rather than Metal — a view
+    // annotation, the logo, the attribution — is a subview of the map view and
+    // so is NOT in the frame the blit above copies. On the platform view UIKit
+    // composites those over the map; here nothing does, and a selected pin
+    // would simply never appear.
+    //
+    // So they are rasterised on the main thread and drawn over the texture on
+    // the gpu. Two things keep that cheap:
+    //
+    // The raster covers only the union of their frames, which is one small
+    // view plus a strip at the bottom, not the screen.
+    //
+    // It is redone only when something has actually moved or is mid-animation.
+    // The logo and attribution never move, so they are rasterised once and
+    // then cost nothing; an annotation opening is redrawn per frame, which is
+    // the one case where a cached bitmap would visibly freeze.
+
+    private func startOverlayLink() {
+        let link = CADisplayLink(target: self, selector: #selector(updateOverlay))
+        link.add(to: .main, forMode: .common)
+        overlayLink = link
+    }
+
+    /// Everything the map view draws with UIKit rather than Metal.
+    private var overlayViews: [UIView] {
+        guard let mapView else { return [] }
+        return mapView.subviews.filter {
+            !($0 is MTKView)
+                && !$0.isHidden
+                && $0.alpha > 0.01
+                && $0.bounds.width > 0
+                && $0.bounds.height > 0
+        }
+    }
+
+    /// True while any of these is running an animation, at which point its
+    /// pixels differ from frame to frame even if its frame does not.
+    private func isAnimating(_ views: [UIView]) -> Bool {
+        for view in views {
+            if view.layer.animationKeys()?.isEmpty == false { return true }
+            for sublayer in view.layer.sublayers ?? [] where sublayer.animationKeys()?.isEmpty == false {
+                return true
+            }
+        }
+        return false
+    }
+
+    @objc private func updateOverlay() {
+        let views = overlayViews
+        guard !views.isEmpty, let mapView, let device = mtkView?.device else {
+            overlayLock.lock()
+            overlayTexture = nil
+            overlayRect = .zero
+            overlayLock.unlock()
+            overlaySignature = []
+            return
+        }
+
+        let signature = views.map(\.frame)
+        guard signature != overlaySignature || isAnimating(views) else { return }
+        overlaySignature = signature
+
+        let scale = mapView.contentScaleFactor
+        var union = CGRect.null
+        for view in views { union = union.union(view.frame) }
+        union = union.intersection(mapView.bounds)
+        guard !union.isNull, union.width > 0, union.height > 0 else { return }
+
+        let width = Int((union.width * scale).rounded())
+        let height = Int((union.height * scale).rounded())
+        guard width > 0, height > 0 else { return }
+
+        // BGRA premultiplied, which is what the destination texture is, so
+        // the bytes go straight over with no conversion.
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let hasContent: Bool = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                        | CGBitmapInfo.byteOrder32Little.rawValue)
+            else { return false }
+
+            // A bitmap context draws y-up and UIKit lays out y-down, so the
+            // vertical axis is flipped before anything is drawn into it.
+            context.translateBy(x: 0, y: CGFloat(height))
+            context.scaleBy(x: scale, y: -scale)
+            context.translateBy(x: -union.origin.x, y: -union.origin.y)
+            UIGraphicsPushContext(context)
+            for view in views {
+                context.saveGState()
+                context.translateBy(x: view.frame.origin.x, y: view.frame.origin.y)
+                // The model layer, not the view: `drawHierarchy` needs the
+                // view to be on screen, and this one never is.
+                (view.layer.presentation() ?? view.layer).render(in: context)
+                context.restoreGState()
+            }
+            UIGraphicsPopContext()
+            return true
+        }
+        guard hasContent else { return }
+
+        let texture = overlayDestination(width: width, height: height, device: device)
+        guard let texture else { return }
+        pixels.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            texture.replace(region: MTLRegionMake2D(0, 0, width, height),
+                            mipmapLevel: 0,
+                            withBytes: base,
+                            bytesPerRow: bytesPerRow)
+        }
+
+        overlayLock.lock()
+        overlayTexture = texture
+        overlayRect = CGRect(x: union.origin.x * scale, y: union.origin.y * scale,
+                             width: CGFloat(width), height: CGFloat(height))
+        overlayLock.unlock()
+    }
+
+    private func overlayDestination(width: Int, height: Int, device: MTLDevice) -> MTLTexture? {
+        overlayLock.lock()
+        let existing = overlayTexture
+        overlayLock.unlock()
+        if let existing, existing.width == width, existing.height == height {
+            return existing
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    /// Draw the overlay over the copied map frame, on the same command buffer,
+    /// so it lands in the same texture flutter is handed.
+    private func compositeOverlay(onto destination: MTLTexture, commandBuffer: MTLCommandBuffer) {
+        overlayLock.lock()
+        let source = overlayTexture
+        let rect = overlayRect
+        overlayLock.unlock()
+        guard let source, rect.width > 0, rect.height > 0,
+              let device = mtkView?.device,
+              let pipeline = overlayPipeline(for: destination.pixelFormat, device: device)
+        else { return }
+
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = destination
+        descriptor.colorAttachments[0].loadAction = .load
+        descriptor.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+
+        // Pixels to clip space. Metal's y runs up the screen and UIKit's runs
+        // down it, so the vertical span is flipped here rather than in the
+        // shader.
+        let w = CGFloat(destination.width)
+        let h = CGFloat(destination.height)
+        var quad = SIMD4<Float>(
+            Float(rect.minX / w * 2 - 1),
+            Float(1 - rect.minY / h * 2),
+            Float(rect.maxX / w * 2 - 1),
+            Float(1 - rect.maxY / h * 2)
+        )
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setVertexBytes(&quad, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        encoder.setFragmentTexture(source, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+    }
+
+    /// Compiled from source at runtime so the plugin needs no `.metal` file in
+    /// its build, which a pod would have to declare and ship separately.
+    private func overlayPipeline(for format: MTLPixelFormat, device: MTLDevice) -> MTLRenderPipelineState? {
+        if let existing = overlayPipelines[format] { return existing }
+        let source = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct VOut { float4 position [[position]]; float2 uv; };
+        vertex VOut albo_overlay_vertex(uint id [[vertex_id]],
+                                        constant float4 &rect [[buffer(0)]]) {
+            float2 corners[4] = { float2(rect.x, rect.y), float2(rect.z, rect.y),
+                                  float2(rect.x, rect.w), float2(rect.z, rect.w) };
+            float2 uvs[4] = { float2(0, 0), float2(1, 0), float2(0, 1), float2(1, 1) };
+            VOut out;
+            out.position = float4(corners[id], 0, 1);
+            out.uv = uvs[id];
+            return out;
+        }
+        fragment float4 albo_overlay_fragment(VOut in [[stage_in]],
+                                              texture2d<float> tex [[texture(0)]]) {
+            constexpr sampler s(filter::linear, address::clamp_to_edge);
+            return tex.sample(s, in.uv);
+        }
+        """
+        guard let library = try? device.makeLibrary(source: source, options: nil),
+              let vertexFunction = library.makeFunction(name: "albo_overlay_vertex"),
+              let fragmentFunction = library.makeFunction(name: "albo_overlay_fragment")
+        else { return nil }
+
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        let attachment = descriptor.colorAttachments[0]
+        attachment?.pixelFormat = format
+        attachment?.isBlendingEnabled = true
+        // The raster is premultiplied, so the source is added whole rather
+        // than scaled by its own alpha a second time.
+        attachment?.sourceRGBBlendFactor = .one
+        attachment?.sourceAlphaBlendFactor = .one
+        attachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        attachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return nil }
+        overlayPipelines[format] = pipeline
+        return pipeline
     }
 
     private static func findMTKView(in view: UIView) -> MTKView? {

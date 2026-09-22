@@ -15,6 +15,13 @@ public final class MapboxMapController: NSObject, FlutterPlatformView {
     /// The underlying map, for callers that host this controller outside the
     /// platform view (see HeadlessMapTexture).
     var map: MapboxMap { mapboxMap }
+
+    /// The map's view, typed. Same object `view()` returns.
+    var mapboxMapView: MapView { mapView }
+
+    /// Registered interactions, so a host with no touch delivery of its own
+    /// can dispatch them (see HeadlessMapTexture).
+    var interactions: InteractionsController? { interactionsController }
     private let channel: FlutterMethodChannel
     private let annotationController: AnnotationController?
     private let gesturesController: GesturesController?

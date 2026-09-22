@@ -27,6 +27,7 @@ final class HeadlessMapTexture: NSObject {
     private init?(size: CGSize,
                   channelSuffix: Int,
                   options: MapInitOptions,
+                  eventTypes: [Int],
                   registrar: FlutterPluginRegistrar) {
         let frame = CGRect(origin: .zero, size: size)
 
@@ -39,7 +40,7 @@ final class HeadlessMapTexture: NSObject {
             channelSuffix: channelSuffix,
             registrar: registrar,
             pluginVersion: "",
-            eventTypes: []
+            eventTypes: eventTypes
         )
 
         // Parked in the app's OWN key window, off to the side, rather than in
@@ -68,10 +69,12 @@ final class HeadlessMapTexture: NSObject {
     static func create(size: CGSize,
                        channelSuffix: Int,
                        options: MapInitOptions,
+                       eventTypes: [Int],
                        registrar: FlutterPluginRegistrar) -> Int64 {
         guard let instance = HeadlessMapTexture(size: size,
                                                 channelSuffix: channelSuffix,
                                                 options: options,
+                                                eventTypes: eventTypes,
                                                 registrar: registrar) else {
             return -1
         }
@@ -80,40 +83,111 @@ final class HeadlessMapTexture: NSObject {
     }
 
     static func dispose(textureId: Int64) {
+        instances[textureId]?.stopFling()
         instances[textureId]?.publisher.stop()
         instances[textureId]?.host.removeFromSuperview()
         instances[textureId] = nil
     }
 
-    /// The logo and attribution are UIKit subviews of the MapView, drawn with
-    /// Core Graphics, so they are not in the Metal drawable and do not reach
-    /// the texture. Mapbox's terms require them, so they are rasterised here
-    /// and drawn by flutter over the texture at the same position.
+    /// Draw one frame.
     ///
-    /// Returns a transparent image the size of the map with only the ornaments
-    /// in it, so the caller can overlay it without covering the map.
-    static func ornaments(textureId: Int64) -> FlutterStandardTypedData? {
-        guard let instance = instances[textureId] else { return nil }
-        let view = instance.controller.view()
-        let ornaments = view.subviews.filter { !($0 is MTKView) && !$0.isHidden }
-        guard !ornaments.isEmpty else { return nil }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = false
-        let renderer = UIGraphicsImageRenderer(bounds: view.bounds, format: format)
-        let image = renderer.image { _ in
-            for ornament in ornaments {
-                let frame = ornament.convert(ornament.bounds, to: view)
-                ornament.drawHierarchy(in: frame, afterScreenUpdates: true)
-            }
-        }
-        guard let png = image.pngData() else { return nil }
-        return FlutterStandardTypedData(bytes: png)
-    }
-
-    /// The map only draws on demand, so a still map stops vending frames.
+    /// The map renders on demand, so after a change that flutter cannot
+    /// observe — a resize, a style swap — the texture would otherwise keep
+    /// showing the frame before it. This is NOT a loop: it used to be driven
+    /// by a 30fps timer, which under glass meant every surface on the map
+    /// redrew thirty times a second with the map standing still. Every
+    /// ordinary camera change already renders on its own.
     static func pump(textureId: Int64) {
         instances[textureId]?.controller.map.triggerRepaint()
+    }
+
+    // MARK: - Interactions
+
+    /// Fire the interactions this tap would have fired.
+    ///
+    /// `addInteraction` hands the sdk a callback it dispatches from its own
+    /// tap recogniser. That recogniser never fires here, so without this the
+    /// app's pin taps are silently dead — see [InteractionsController.dispatch].
+    static func tap(textureId: Int64, at point: CGPoint) {
+        instances[textureId]?.controller.interactions?.dispatch(.tAP, at: point)
+    }
+
+    static func longPress(textureId: Int64, at point: CGPoint) {
+        instances[textureId]?.controller.interactions?.dispatch(.lONGTAP, at: point)
+    }
+
+    // MARK: - Fling
+    //
+    // The sdk decelerates a pan through `CameraAnimationsManager.decelerate`,
+    // which is internal to it, so the same physics is run here: displace from
+    // the release point by velocity × elapsed each frame, and decay the
+    // velocity once per millisecond by the platform's own scroll deceleration
+    // rate. Stops under 35pt/s, the sdk's own floor.
+
+    private var flingLink: CADisplayLink?
+    private var flingVelocity: CGPoint = .zero
+    private var flingOrigin: CGPoint = .zero
+    private var flingPrevious: CFTimeInterval = 0
+
+    /// Below this a flick is indistinguishable from letting go, and a fling
+    /// there reads as the map sliding on its own.
+    private static let minimumFlingSpeed: CGFloat = 50
+
+    static func fling(textureId: Int64, velocity: CGPoint, at point: CGPoint) {
+        guard let instance = instances[textureId] else { return }
+        instance.stopFling()
+        guard abs(velocity.x) > minimumFlingSpeed || abs(velocity.y) > minimumFlingSpeed else { return }
+        instance.flingVelocity = velocity
+        instance.flingOrigin = point
+        instance.flingPrevious = CACurrentMediaTime()
+        let link = CADisplayLink(target: instance, selector: #selector(stepFling))
+        link.add(to: .main, forMode: .common)
+        instance.flingLink = link
+    }
+
+    static func stopFling(textureId: Int64) {
+        instances[textureId]?.stopFling()
+    }
+
+    private func stopFling() {
+        flingLink?.invalidate()
+        flingLink = nil
+        flingVelocity = .zero
+    }
+
+    @objc private func stepFling() {
+        let now = CACurrentMediaTime()
+        let elapsed = CGFloat(now - flingPrevious)
+        flingPrevious = now
+
+        // Always relative to the release point, the way the sdk's animator
+        // does it: the displacement shrinks with the velocity rather than the
+        // cursor running away across the map.
+        let to = CGPoint(x: flingOrigin.x + flingVelocity.x * elapsed,
+                         y: flingOrigin.y + flingVelocity.y * elapsed)
+        let map = controller.map
+        map.setCamera(to: map.dragCameraOptions(from: flingOrigin, to: to))
+
+        let decay = pow(UIScrollView.DecelerationRate.normal.rawValue, elapsed * 1000)
+        flingVelocity.x *= decay
+        flingVelocity.y *= decay
+        if abs(flingVelocity.x) < 35 && abs(flingVelocity.y) < 35 {
+            stopFling()
+        }
+    }
+
+    /// Double tap to zoom in, two-finger tap to zoom out — animated, because
+    /// an instant jump of a whole zoom level reads as the map teleporting.
+    static func zoomStep(textureId: Int64, delta: Double, at point: CGPoint) {
+        guard let instance = instances[textureId] else { return }
+        instance.stopFling()
+        let map = instance.controller.map
+        let zoom = max(0, min(22, map.cameraState.zoom + CGFloat(delta)))
+        instance.controller.mapboxMapView.camera.ease(
+            to: camera(map, anchor: point, zoom: zoom),
+            duration: 0.3,
+            curve: .easeOut
+        )
     }
 
     /// Rotation, split view, a keyboard appearing: the texture has to follow
@@ -138,6 +212,7 @@ final class HeadlessMapTexture: NSObject {
     private var lastDrag: CGPoint?
 
     static func panBegin(textureId: Int64, at point: CGPoint) {
+        instances[textureId]?.stopFling()
         instances[textureId]?.lastDrag = point
     }
 
