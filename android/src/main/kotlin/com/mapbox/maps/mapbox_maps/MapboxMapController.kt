@@ -427,6 +427,7 @@ class MapboxMapController(
         viewLayerController.demoteAllFeatures()
         viewAnnotationController.removeAll()
         result.success(null)
+      }
       "map#setCustomHeadersForHost" -> {
         try {
           val host = call.argument<String>("host")
