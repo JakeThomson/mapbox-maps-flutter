@@ -31,7 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mapbox.maps.mapbox_maps.LocalViewAnnotationVisible
+import com.mapbox.maps.mapbox_maps.ViewAnnotationRegistry
 
 @Composable
 fun CalloutView(
@@ -41,7 +41,7 @@ fun CalloutView(
     selected: Boolean = false
 ) {
     // Visibility state from Mapbox collision detection
-    val isVisible by LocalViewAnnotationVisible.current
+    val isVisible by ViewAnnotationRegistry.LocalViewAnnotationVisible.current
 
     // Visibility animation (for collision detection show/hide)
     val visibilityScale by animateFloatAsState(
