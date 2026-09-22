@@ -5,7 +5,7 @@ part of mapbox_maps_flutter;
 /// @see [The online documentation](https://docs.mapbox.com/mapbox-gl-js/style-spec/sources/#vector)
 class VectorSource extends Source {
   VectorSource({
-    required String id,
+    required super.id,
     String? url,
     List<String?>? tiles,
     List<double?>? bounds,
@@ -21,7 +21,7 @@ class VectorSource extends Source {
     double? tileRequestsDelay,
     double? tileNetworkRequestsDelay,
     Object? promoteId,
-  }) : super(id: id) {
+  }) {
     _url = url;
     _tiles = tiles;
     _bounds = bounds;

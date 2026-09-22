@@ -34,13 +34,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Extract the archive URLs for direct dependencies, excluding the package named 'flutter'
-package_info=$(echo "$deps" | jq -r '.packages[] | select(.kind == "direct" and .name != "flutter") | "\(.name) \(.version)"')
-sdk_version=$(echo "$deps" | jq -r '.packages[] | select(.kind == "root") | .version')
+# Get version and direct dependencies from mapbox_maps_flutter package specifically
+mapbox_root=$(echo "$deps" | jq '.packages[] | select(.kind == "root" and .name == "mapbox_maps_flutter")')
+sdk_version=$(echo "$mapbox_root" | jq -r '.version')
+direct_deps=$(echo "$mapbox_root" | jq -r '.directDependencies[]')
+
+# Filter packages to only include direct dependencies of mapbox_maps_flutter (excluding flutter SDK)
+# Convert direct_deps list to jq array filter
+deps_filter=$(echo "$direct_deps" | jq -R -s -c 'split("\n") | map(select(length > 0 and . != "flutter"))')
+package_info=$(echo "$deps" | jq -r --argjson deps "$deps_filter" '.packages[] | select(.name as $name | $deps | index($name)) | "\(.name) \(.version)"')
 
 deps_licenses=""
 # Loop through each name/version pair
 while read -r name version; do
+  # Skip empty entries (can happen in workspace configurations)
+  if [ -z "$name" ] || [ -z "$version" ]; then
+    continue
+  fi
 
   package_metadata=$(curl -s "https://pub.dev/api/packages/$name/versions/$version")
   archive_url=$(echo "$package_metadata" | jq -r '.archive_url')
@@ -63,10 +73,26 @@ while read -r name version; do
   # Add your logic here to handle each package
 done <<< "$package_info"
 
-ios_sdk_version=$(grep -A 1 'mapbox-maps-ios' ios/mapbox_maps_flutter/Package.swift | grep 'exact' | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)".*/\1/')
-android_sdk_version=$(grep 'com.mapbox.maps:android-ndk27' android/build.gradle | sed -E 's/.*"com\.mapbox\.maps:android-ndk27:([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)".*/\1/')
-ios_license_content=$(curl -s "https://raw.githubusercontent.com/mapbox/mapbox-maps-ios/v$ios_sdk_version/LICENSE.md")
-android_license_content=$(curl -s "https://raw.githubusercontent.com/mapbox/mapbox-maps-android/v$android_sdk_version/LICENSE.md")
+# Resolve the script's directory to find the monorepo projects root
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projects_dir="$(cd "$script_dir/../../../.." && pwd)"
+
+# Read iOS and Android SDK licenses from local monorepo paths
+ios_license_path="$projects_dir/maps-ios/mapbox-maps-ios/LICENSE.md"
+android_license_path="$projects_dir/maps-android/mapbox-maps-android/LICENSE.md"
+
+if [ ! -f "$ios_license_path" ]; then
+  echo "Error: iOS LICENSE.md not found at $ios_license_path"
+  exit 1
+fi
+
+if [ ! -f "$android_license_path" ]; then
+  echo "Error: Android LICENSE.md not found at $android_license_path"
+  exit 1
+fi
+
+ios_license_content=$(cat "$ios_license_path")
+android_license_content=$(cat "$android_license_path")
 
 current_year=$(date +%Y)
 
@@ -99,6 +125,10 @@ if [ "$mode" == "validate" ]; then
         cat LICENSE > /tmp/current_license.txt
         echo "Diff (expected vs current):"
         diff /tmp/expected_license.txt /tmp/current_license.txt || true
+        echo ""
+        echo "To fix, from the mapbox-sdk repo root run:"
+        echo "  cd projects/maps-flutter && make generate-license"
+        echo "Then commit the updated LICENSE file."
         exit 1
     fi
 elif [ "$mode" == "generate" ]; then

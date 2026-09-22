@@ -33,6 +33,7 @@ void main() {
       rasterColor: Colors.red.value,
       rasterColorMix: [0.0, 1.0, 2.0, 3.0],
       rasterColorRange: [0.0, 1.0],
+      rasterColorScale: RasterColorScale.LINEAR,
       rasterContrast: 1.0,
       rasterElevation: 1.0,
       rasterEmissiveStrength: 1.0,
@@ -54,6 +55,7 @@ void main() {
     expect(layer.rasterColor, Colors.red.value);
     expect(layer.rasterColorMix, [0.0, 1.0, 2.0, 3.0]);
     expect(layer.rasterColorRange, [0.0, 1.0]);
+    expect(layer.rasterColorScale, RasterColorScale.LINEAR);
     expect(layer.rasterContrast, 1.0);
     expect(layer.rasterElevation, 1.0);
     expect(layer.rasterEmissiveStrength, 1.0);
@@ -100,6 +102,7 @@ void main() {
         'literal',
         [0.0, 1.0]
       ],
+      rasterColorScaleExpression: ['string', 'linear'],
       rasterContrastExpression: ['number', 1.0],
       rasterElevationExpression: ['number', 1.0],
       rasterEmissiveStrengthExpression: ['number', 1.0],
@@ -126,6 +129,7 @@ void main() {
     expect(layer.rasterColorExpression, ['rgba', 255, 0, 0, 1]);
     expect(layer.rasterColorMix, [0.0, 1.0, 2.0, 3.0]);
     expect(layer.rasterColorRange, [0.0, 1.0]);
+    expect(layer.rasterColorScale, RasterColorScale.LINEAR);
     expect(layer.rasterContrast, 1.0);
     expect(layer.rasterElevation, 1.0);
     expect(layer.rasterEmissiveStrength, 1.0);

@@ -449,7 +449,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterRunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterRunnerTests";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
@@ -482,7 +482,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterRunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterRunnerTests";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
@@ -515,7 +515,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterRunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterRunnerTests";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
@@ -593,7 +593,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterMapsExample;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterMapsExample";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -724,7 +724,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterMapsExample;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterMapsExample";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -750,7 +750,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.mapbox.maps.FlutterMapsExample;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.maps.FlutterMapsExample";
+				PROVISIONING_PROFILE_SPECIFIER = "match Development com.mapbox.*";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";

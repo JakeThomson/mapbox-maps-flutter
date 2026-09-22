@@ -6,13 +6,13 @@ ENV["SPACESHIP_SKIP_2FA_UPGRADE"] = "1"
 platform :ios do
 
   lane :build_examples_tests do
-    setup_circle_ci
+    setup_ci
     sync_code_signing(type: "development")
     update_code_signing_settings(
       use_automatic_signing: false,
       path: "example/ios/Runner.xcodeproj",
       team_id: "GJZR2MEM28", # Developer Portal Team ID,
-      profile_name: lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]["com.mapbox.maps.FlutterMapsExample"],
+      profile_name: lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]["com.mapbox.*"],
       targets: ["Runner"],
       code_sign_identity: "Apple Development: Created via API",
     )
@@ -20,7 +20,7 @@ platform :ios do
       use_automatic_signing: false,
       path: "example/ios/Runner.xcodeproj",
       team_id: "GJZR2MEM28", # Developer Portal Team ID,
-      profile_name: lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]["com.mapbox.maps.FlutterRunnerTests"],
+      profile_name: lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]["com.mapbox.*"],
       targets: ["RunnerTests"],
       code_sign_identity: "Apple Development: Created via API",
     )

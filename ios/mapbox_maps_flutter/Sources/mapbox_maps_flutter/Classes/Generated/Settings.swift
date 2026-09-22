@@ -92,7 +92,7 @@ enum PuckBearing: Int {
 }
 
 /// Defines scaling mode. Only applies to location-indicator type layers.
-/// Default value: "map".
+/// Default value: "viewport".
 enum ModelScaleMode: Int {
   /// Model is scaled so that it's always the same size relative to other map features. The property model-scale specifies how many meters each unit in the model file should cover.
   case mAP = 0
@@ -310,7 +310,7 @@ struct LocationPuck3D {
   /// Default value: true.
   var modelReceiveShadows: Bool? = nil
   /// Defines scaling mode. Only applies to location-indicator type layers.
-  /// Default value: "map".
+  /// Default value: "viewport".
   var modelScaleMode: ModelScaleMode? = nil
   /// Strength of the emission. There is no emission for value 0. For value 1.0, only emissive component (no shading) is displayed and values above 1.0 produce light contribution to surrounding area, for some of the parts (e.g. doors). Expressions that depend on measure-light are only supported as a global layer value (and not for each feature) when using GeoJSON or vector tile as the model layer source.
   /// Default value: 1. Value range: [0, 5]
@@ -840,6 +840,60 @@ struct LogoSettings {
   }
 }
 
+/// Settings for the indoor floor selector.
+///
+/// Generated class from Pigeon that represents data sent in messages.
+struct IndoorSelectorSettings {
+  /// Whether the indoor selector is visible on the map.
+  /// Default value: true.
+  var enabled: Bool? = nil
+  /// Defines where the indoor selector is positioned on the map.
+  /// Default value: "top-right".
+  var position: OrnamentPosition? = nil
+  /// Defines the margin to the left that the indoor selector honors.
+  /// Default value: 8.
+  var marginLeft: Double? = nil
+  /// Defines the margin to the top that the indoor selector honors.
+  /// Default value: 60.
+  var marginTop: Double? = nil
+  /// Defines the margin to the right that the indoor selector honors.
+  /// Default value: 8.
+  var marginRight: Double? = nil
+  /// Defines the margin to the bottom that the indoor selector honors.
+  /// Default value: 8.
+  var marginBottom: Double? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> IndoorSelectorSettings? {
+    let enabled: Bool? = nilOrValue(pigeonVar_list[0])
+    let position: OrnamentPosition? = nilOrValue(pigeonVar_list[1])
+    let marginLeft: Double? = nilOrValue(pigeonVar_list[2])
+    let marginTop: Double? = nilOrValue(pigeonVar_list[3])
+    let marginRight: Double? = nilOrValue(pigeonVar_list[4])
+    let marginBottom: Double? = nilOrValue(pigeonVar_list[5])
+
+    return IndoorSelectorSettings(
+      enabled: enabled,
+      position: position,
+      marginLeft: marginLeft,
+      marginTop: marginTop,
+      marginRight: marginRight,
+      marginBottom: marginBottom
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      enabled,
+      position,
+      marginLeft,
+      marginTop,
+      marginRight,
+      marginBottom,
+    ]
+  }
+}
+
 private class SettingsPigeonCodecReader: FlutterStandardReader {
   override func readValue(ofType type: UInt8) -> Any? {
     switch type {
@@ -899,6 +953,8 @@ private class SettingsPigeonCodecReader: FlutterStandardReader {
       return AttributionSettings.fromList(self.readValue() as! [Any?])
     case 144:
       return LogoSettings.fromList(self.readValue() as! [Any?])
+    case 145:
+      return IndoorSelectorSettings.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
     }
@@ -955,6 +1011,9 @@ private class SettingsPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? LogoSettings {
       super.writeByte(144)
       super.writeValue(value.toList())
+    } else if let value = value as? IndoorSelectorSettings {
+      super.writeByte(145)
+      super.writeValue(value.toList())
     } else {
       super.writeValue(value)
     }
@@ -979,7 +1038,12 @@ class SettingsPigeonCodec: FlutterStandardMessageCodec, @unchecked Sendable {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol GesturesSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> GesturesSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: GesturesSettings) throws
 }
 
@@ -989,6 +1053,8 @@ class GesturesSettingsInterfaceSetup {
   /// Sets up an instance of `GesturesSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: GesturesSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.GesturesSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1002,6 +1068,9 @@ class GesturesSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.GesturesSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
@@ -1023,7 +1092,12 @@ class GesturesSettingsInterfaceSetup {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol _LocationComponentSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> LocationComponentSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: LocationComponentSettings, useDefaultPuck2DIfNeeded: Bool) throws
 }
 
@@ -1033,6 +1107,8 @@ class _LocationComponentSettingsInterfaceSetup {
   /// Sets up an instance of `_LocationComponentSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: _LocationComponentSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter._LocationComponentSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1046,6 +1122,9 @@ class _LocationComponentSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter._LocationComponentSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
@@ -1068,7 +1147,12 @@ class _LocationComponentSettingsInterfaceSetup {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol ScaleBarSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> ScaleBarSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: ScaleBarSettings) throws
 }
 
@@ -1078,6 +1162,8 @@ class ScaleBarSettingsInterfaceSetup {
   /// Sets up an instance of `ScaleBarSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: ScaleBarSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.ScaleBarSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1091,6 +1177,9 @@ class ScaleBarSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.ScaleBarSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
@@ -1112,7 +1201,12 @@ class ScaleBarSettingsInterfaceSetup {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol CompassSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> CompassSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: CompassSettings) throws
 }
 
@@ -1122,6 +1216,8 @@ class CompassSettingsInterfaceSetup {
   /// Sets up an instance of `CompassSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: CompassSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.CompassSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1135,6 +1231,9 @@ class CompassSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.CompassSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
@@ -1156,7 +1255,12 @@ class CompassSettingsInterfaceSetup {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol AttributionSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> AttributionSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: AttributionSettings) throws
 }
 
@@ -1166,6 +1270,8 @@ class AttributionSettingsInterfaceSetup {
   /// Sets up an instance of `AttributionSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: AttributionSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.AttributionSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1179,6 +1285,9 @@ class AttributionSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.AttributionSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
@@ -1200,7 +1309,12 @@ class AttributionSettingsInterfaceSetup {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol LogoSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   func getSettings() throws -> LogoSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   func updateSettings(settings: LogoSettings) throws
 }
 
@@ -1210,6 +1324,8 @@ class LogoSettingsInterfaceSetup {
   /// Sets up an instance of `LogoSettingsInterface` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: LogoSettingsInterface?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
     let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.LogoSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getSettingsChannel.setMessageHandler { _, reply in
@@ -1223,11 +1339,68 @@ class LogoSettingsInterfaceSetup {
     } else {
       getSettingsChannel.setMessageHandler(nil)
     }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
     let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.LogoSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       updateSettingsChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let settingsArg = args[0] as! LogoSettings
+        do {
+          try api.updateSettings(settings: settingsArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      updateSettingsChannel.setMessageHandler(nil)
+    }
+  }
+}
+/// Settings for the indoor floor selector.
+///
+/// Generated protocol from Pigeon that represents a handler of messages from Flutter.
+protocol IndoorSelectorSettingsInterface {
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
+  func getSettings() throws -> IndoorSelectorSettings
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
+  func updateSettings(settings: IndoorSelectorSettings) throws
+}
+
+/// Generated setup class from Pigeon to handle messages through the `binaryMessenger`.
+class IndoorSelectorSettingsInterfaceSetup {
+  static var codec: FlutterStandardMessageCodec { SettingsPigeonCodec.shared }
+  /// Sets up an instance of `IndoorSelectorSettingsInterface` to handle messages through the `binaryMessenger`.
+  static func setUp(binaryMessenger: FlutterBinaryMessenger, api: IndoorSelectorSettingsInterface?, messageChannelSuffix: String = "") {
+    let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    /// Returns the currently applied settings, populated with default
+    /// values for any fields not explicitly modified via [updateSettings].
+    let getSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.IndoorSelectorSettingsInterface.getSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      getSettingsChannel.setMessageHandler { _, reply in
+        do {
+          let result = try api.getSettings()
+          reply(wrapResult(result))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      getSettingsChannel.setMessageHandler(nil)
+    }
+    /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+    ///
+    /// Call [getSettings] to retrieve the full resulting configuration.
+    let updateSettingsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.mapbox_maps_flutter.IndoorSelectorSettingsInterface.updateSettings\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      updateSettingsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let settingsArg = args[0] as! IndoorSelectorSettings
         do {
           try api.updateSettings(settings: settingsArg)
           reply(wrapResult(nil))

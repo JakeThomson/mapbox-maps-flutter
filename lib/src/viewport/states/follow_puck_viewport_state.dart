@@ -97,6 +97,9 @@ final class FollowPuckViewportState extends ViewportState {
   /// Defaults to `45`.
   final double? pitch;
 
+  /// The value to use for setting CameraOptions.padding. If null, padding will not be modified by the FollowPuckViewportState.
+  final MbxEdgeInsets? padding;
+
   /// Creates a [FollowPuckViewportState] that configures the camera to follow the user's location indicator.
   ///
   /// The camera will continuously track the user's position on the map, adjusting its position and orientation based on the provided [zoom], [bearing], and [pitch] values.
@@ -106,11 +109,12 @@ final class FollowPuckViewportState extends ViewportState {
   /// - [zoom]: The zoom level of the map. Defaults to `16.35`.
   /// - [bearing]: The bearing behavior of the map. Defaults to [FollowPuckViewportStateBearingHeading].
   /// - [pitch]: The pitch of the camera toward the horizon, in degrees. Defaults to `45`.
-  const FollowPuckViewportState({
-    this.zoom = 16.35,
-    this.bearing = const FollowPuckViewportStateBearingHeading(),
-    this.pitch = 45,
-  }) : super();
+  const FollowPuckViewportState(
+      {this.zoom = 16.35,
+      this.bearing = const FollowPuckViewportStateBearingHeading(),
+      this.pitch = 45,
+      this.padding})
+      : super();
 }
 
 extension on FollowPuckViewportStateBearing {

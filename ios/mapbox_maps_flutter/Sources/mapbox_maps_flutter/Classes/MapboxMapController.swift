@@ -1,4 +1,5 @@
 import Flutter
+import MapboxCommon
 @_spi(Experimental) import MapboxMaps
 import UIKit
 
@@ -7,7 +8,7 @@ struct SuffixBinaryMessenger {
     let suffix: String
 }
 
-final class MapboxMapController: NSObject, FlutterPlatformView {
+public final class MapboxMapController: NSObject, FlutterPlatformView {
     private let mapView: MapView
     private let mapboxMap: MapboxMap
 
@@ -23,23 +24,32 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
     private let eventHandler: MapboxEventHandler
     private let binaryMessenger: SuffixBinaryMessenger
 
-    func view() -> UIView {
+    public func view() -> UIView {
         return mapView
     }
 
-    init(
+    public init(
         withFrame frame: CGRect,
         mapInitOptions: MapInitOptions,
         channelSuffix: Int,
         registrar: FlutterPluginRegistrar,
         pluginVersion: String,
-        eventTypes: [Int]
+        eventTypes: [Int],
+        externalMapView: MapView? = nil,
+        isOpaque: Bool = true
     ) {
         binaryMessenger = SuffixBinaryMessenger(messenger: registrar.messenger(), suffix: String(channelSuffix))
         _ = SettingsServiceFactory.getInstanceFor(.nonPersistent)
             .set(key: "com.mapbox.common.telemetry.internal.custom_user_agent_fragment", value: "FlutterPlugin/\(pluginVersion)")
 
-        mapView = MapView(frame: frame, mapInitOptions: mapInitOptions)
+        // An injected MapView is owned/configured by the external caller, so init-only
+        // parameters below are skipped and only apply when we construct it ourselves.
+        if let externalMapView {
+            mapView = externalMapView
+        } else {
+            mapView = MapView(frame: frame, mapInitOptions: mapInitOptions)
+            mapView.isOpaque = isOpaque
+        }
         mapboxMap = mapView.mapboxMap
 
         channel = FlutterMethodChannel(
@@ -100,6 +110,9 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
 
         let scaleBarController = ScaleBarController(withMapView: mapView)
         ScaleBarSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: scaleBarController, messageChannelSuffix: binaryMessenger.suffix)
+
+        let indoorSelectorController = IndoorSelectorController(withMapView: mapView)
+        IndoorSelectorSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: indoorSelectorController, messageChannelSuffix: binaryMessenger.suffix)
 
         annotationController = AnnotationController(withMapView: mapView, messenger: binaryMessenger)
         annotationController!.setup()
@@ -187,9 +200,9 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
             ))
             return
         }
-        let customInterceptor = CustomHttpServiceInterceptor()
-        HttpServiceFactory.setHttpServiceInterceptorForInterceptor(customInterceptor)
-            customInterceptor.customHeaders = headers
+        let interceptor = CustomHttpServiceInterceptor.shared
+        interceptor.customHeaders = headers
+        HttpServiceFactory.setHttpServiceInterceptorForInterceptor(interceptor)
         result(nil)
 
         case "viewAnnotation#add":
@@ -278,6 +291,39 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
         case "viewAnnotation#removeAll":
             viewLayerController?.demoteAllFeatures()
             viewAnnotationController.removeAll()
+        case "map#setCustomHeadersForHost":
+            guard let arguments = methodCall.arguments as? [String: Any],
+                  let host = arguments["host"] as? String, !host.isEmpty,
+                  let headers = arguments["headers"] as? [String: String]
+            else {
+                result(FlutterError(
+                    code: "setCustomHeadersForHost",
+                    message: "could not decode arguments",
+                    details: nil
+                ))
+                return
+            }
+            let interceptor = CustomHttpServiceInterceptor.shared
+            interceptor.setHeaders(headers, forHost: host)
+            HttpServiceFactory.setHttpServiceInterceptorForInterceptor(interceptor)
+            result(nil)
+
+        case "map#clearCustomHeaders":
+            CustomHttpServiceInterceptor.shared.clearAll()
+            result(nil)
+
+        case "map#setMaxRequestsPerHost":
+            guard let arguments = methodCall.arguments as? [String: Any],
+                  let max = arguments["max"] as? Int
+            else {
+                result(FlutterError(
+                    code: "setMaxRequestsPerHost",
+                    message: "could not decode arguments",
+                    details: nil
+                ))
+                return
+            }
+            HttpServiceFactory.setMaxRequestsPerHostForMax(UInt8(clamping: max))
             result(nil)
 
         default:
@@ -299,6 +345,7 @@ final class MapboxMapController: NSObject, FlutterPlatformView {
         AttributionSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)
         CompassSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)
         ScaleBarSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)
+        IndoorSelectorSettingsInterfaceSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)
         annotationController?.tearDown()
         _ViewportMessengerSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)
         _PerformanceStatisticsApiSetup.setUp(binaryMessenger: binaryMessenger.messenger, api: nil, messageChannelSuffix: binaryMessenger.suffix)

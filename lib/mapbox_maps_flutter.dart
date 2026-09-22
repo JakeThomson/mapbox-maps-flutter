@@ -57,6 +57,8 @@ part 'src/style/layer/view_layer.dart';
 part 'src/style/mapbox_styles.dart';
 part 'src/style/source/geojson_source.dart';
 part 'src/style/source/image_source.dart';
+part 'src/style/source/model.dart';
+part 'src/style/source/model_source.dart';
 part 'src/style/source/raster_source.dart';
 part 'src/style/source/rasterdem_source.dart';
 part 'src/style/source/rasterarray_source.dart';

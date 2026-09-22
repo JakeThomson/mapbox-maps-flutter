@@ -193,7 +193,7 @@ class _MapboxMapsPlatform {
   Future<dynamic> createAnnotationManager(String type,
       {String? id, String? belowLayerId}) async {
     try {
-      return _channel
+      return await _channel
           .invokeMethod('annotation#create_manager', <String, dynamic>{
         'type': type,
         'id': id,
@@ -215,7 +215,7 @@ class _MapboxMapsPlatform {
 
   Future<dynamic> addGestureListeners() async {
     try {
-      return _channel.invokeMethod('gesture#add_listeners');
+      return await _channel.invokeMethod('gesture#add_listeners');
     } on PlatformException catch (e) {
       return new Future.error(e);
     }
@@ -232,7 +232,7 @@ class _MapboxMapsPlatform {
         radius: interaction.radius,
         filter: interaction.filter);
     try {
-      return _channel
+      return await _channel
           .invokeMethod('interactions#add_interaction', <String, dynamic>{
         'interaction': interactionPigeon.encode(),
       });
@@ -243,7 +243,7 @@ class _MapboxMapsPlatform {
 
   Future<dynamic> removeInteractionsListeners(String interactionID) async {
     try {
-      return _channel.invokeMethod('interactions#remove_interaction',
+      return await _channel.invokeMethod('interactions#remove_interaction',
           <String, dynamic>{'identifier': interactionID});
     } on PlatformException catch (e) {
       return new Future.error(e);
@@ -252,7 +252,7 @@ class _MapboxMapsPlatform {
 
   Future<dynamic> removeGestureListeners() async {
     try {
-      return _channel.invokeMethod('gesture#remove_listeners');
+      return await _channel.invokeMethod('gesture#remove_listeners');
     } on PlatformException catch (e) {
       return new Future.error(e);
     }

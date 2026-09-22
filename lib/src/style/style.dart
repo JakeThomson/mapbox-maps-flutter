@@ -57,6 +57,17 @@ enum RasterResampling {
   NEAREST,
 }
 
+/// When `raster-color` is active, specifies how raster values are distributed across the color ramp over the range specified by `raster-color-range`.
+/// Default value: "linear".
+@experimental
+enum RasterColorScale {
+  /// Raster values are spaced evenly across the color ramp.
+  LINEAR,
+
+  /// Raster values are spaced logarithmically, giving more of the color ramp to smaller values. Useful for data concentrated near the low end of a wide range.
+  LOG,
+}
+
 /// Direction of light source when map is rotated.
 enum HillshadeIlluminationAnchor {
   /// The hillshade illumination is relative to the north direction.
@@ -494,6 +505,10 @@ extension StyleSource on StyleManager {
       case "raster-array":
         source = RasterArraySource(id: sourceId);
         break;
+      case "model":
+      case "batched-model":
+        source = ModelSource(id: sourceId, batched: type == "batched-model");
+        break;
       default:
         print("Source type: $type unknown.");
     }
@@ -509,6 +524,24 @@ extension StyleColorInt on int {
   String toRGBA() {
     final color = Color(this);
     return "rgba(${color.red}, ${color.green}, ${color.blue}, ${color.alpha / 255})";
+  }
+}
+
+extension StyleColorString on String {
+  /// Convert the color from a CSS-style `"rgba(r,g,b,a)"` string, as returned
+  /// for plain (non-expression) color properties like `ModelMaterialOverride.modelColor`, to int.
+  int toRGBAInt() {
+    final match =
+        RegExp(r'^rgba\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\)$')
+            .firstMatch(this);
+    if (match == null) {
+      return 0;
+    }
+    final red = double.parse(match.group(1)!).round();
+    final green = double.parse(match.group(2)!).round();
+    final blue = double.parse(match.group(3)!).round();
+    final alpha = (double.parse(match.group(4)!) * 255).round();
+    return Color.fromARGB(alpha, red, green, blue).value;
   }
 }
 

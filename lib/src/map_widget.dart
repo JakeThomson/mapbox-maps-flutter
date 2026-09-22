@@ -4,29 +4,29 @@ final _SuffixesRegistry _suffixesRegistry = _SuffixesRegistry._instance();
 
 /// A mode for platform MapView to be hosted in Flutter on Android platform.
 ///
-/// As per https://github.com/flutter/flutter/wiki/Android-Platform-Views#selecting-a-mode
+/// As per https://github.com/flutter/flutter/blob/master/docs/platforms/android/Android-Platform-Views.md
 @experimental
 enum AndroidPlatformViewHostingMode {
   /// Texture Layer Hybrid Composition with fallback to Virtual Display,
   /// when the current SDK version is <23 or [MapWidget.textureView] is `false`.
   ///
-  /// https://github.com/flutter/flutter/wiki/Texture-Layer-Hybrid-Composition
+  /// https://github.com/flutter/flutter/blob/master/docs/platforms/android/Texture-Layer-Hybrid-Composition.md
   TLHC_VD,
 
   /// Use Texture Layer Hybrid Composition hosting mode with fallback to Hybrid Composition,
   /// when the current SDK version is <23 or [MapWidget.textureView] is `false`.
   ///
-  /// https://github.com/flutter/flutter/wiki/Texture-Layer-Hybrid-Composition
+  /// https://github.com/flutter/flutter/blob/master/docs/platforms/android/Texture-Layer-Hybrid-Composition.md
   TLHC_HC,
 
   /// Always use Hybrid Composition hosting mode.
   ///
-  /// https://github.com/flutter/flutter/wiki/Hybrid-Composition
+  /// https://github.com/flutter/flutter/blob/master/docs/platforms/Hybrid-Composition.md
   HC,
 
   /// Always use Virtual Display hosting mode.
   ///
-  /// https://github.com/flutter/flutter/wiki/Virtual-Display
+  /// https://github.com/flutter/flutter/blob/master/docs/platforms/android/Virtual-Display.md
   VD,
 }
 
@@ -44,6 +44,8 @@ class MapWidget extends StatefulWidget {
   const MapWidget({
     super.key,
     this.mapOptions,
+    @Deprecated(
+        'Use [viewport] to specify the camera position and behavior of the map')
     this.cameraOptions,
     // FIXME Flutter 3.x has memory leak on Android using in SurfaceView mode, see https://github.com/flutter/flutter/issues/118384
     // As a workaround default is true.
@@ -66,17 +68,25 @@ class MapWidget extends StatefulWidget {
     this.onStyleImageMissingListener,
     this.onStyleImageUnusedListener,
     this.onResourceRequestListener,
-    this.onTapListener,
+    @Deprecated('Use [MapboxMap.addInteraction] instead') this.onTapListener,
+    @Deprecated('Use [MapboxMap.addInteraction] instead')
     this.onLongTapListener,
     this.onScrollListener,
     this.onZoomListener,
     this.viewport,
-  });
+    this.isOpaque = true,
+  }) : assert(
+          isOpaque != false || textureView != false,
+          'isOpaque: false requires textureView: true on Android. '
+          'SurfaceView cannot render a transparent background.',
+        );
 
   /// Describes the map options value when using a MapWidget.
   final MapOptions? mapOptions;
 
   /// The Initial Camera options when creating a MapWidget.
+  @Deprecated(
+      'This will be removed in future major version, use [viewport] instead')
   final CameraOptions? cameraOptions;
 
   /// Flag indicating to use a TextureView as render surface for the MapWidget.
@@ -175,7 +185,17 @@ class MapWidget extends StatefulWidget {
   /// ```
   final ViewportState? viewport;
 
+  /// Whether the map is rendered as opaque. Only has an effect on iOS —
+  /// on Android, a transparent background requires [MapWidget.textureView]
+  /// to be `true` (the default).
+  ///
+  /// Defaults to `true`. Set to `false` (together with a transparent style)
+  /// to render a transparent map background.
+  final bool? isOpaque;
+
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   final OnMapTapListener? onTapListener;
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   final OnMapLongTapListener? onLongTapListener;
   final OnMapScrollListener? onScrollListener;
   final OnMapZoomListener? onZoomListener;
@@ -207,6 +227,7 @@ class _MapWidgetState extends State<MapWidget> {
       'channelSuffix': _mapboxMapsPlatform.channelSuffix,
       'mapboxPluginVersion': mapboxPluginVersion,
       'eventTypes': _events.eventTypes.map((e) => e.index).toList(),
+      'isOpaque': widget.isOpaque,
     };
     _events.subscribedEventTypes = _events.eventTypes;
 
@@ -321,12 +342,21 @@ class _MapWidgetState extends State<MapWidget> {
     }
     mapboxMap = controller;
 
-    // WARNING: Because platform view is not sized at this moment on iOS,
-    // it is not safe to call methods that depend on the size of the platform view,
-    // e.g. `setCamera` or any high-level API built on top of it(animations, viewport).
+    // WARNING: The platform view isn't guaranteed to be sized at this moment
+    // (e.g. always on iOS, and on Android in the HC hosting mode), so it is
+    // not safe to call methods that depend on the size of the platform
+    // view, e.g. `setCamera` or any high-level API built on top of it
+    // (animations, viewport).
     //
     // As a way to address this we pass the size hint to the view upon creation.
-    final size = key.currentContext?.size;
+    //
+    // `key.currentContext?.size` looks equivalent but throws instead of
+    // returning null when the element is mounted but not yet laid out —
+    // this callback's timing relative to layout isn't guaranteed.
+    final renderObject = key.currentContext?.findRenderObject();
+    final size = renderObject is RenderBox && renderObject.hasSize
+        ? renderObject.size
+        : null;
     if (size != null) {
       await _mapboxMapsPlatform.submitViewSizeHint(
           width: size.width, height: size.height);

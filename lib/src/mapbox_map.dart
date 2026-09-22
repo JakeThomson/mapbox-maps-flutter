@@ -163,6 +163,17 @@ class MapboxMap extends ChangeNotifier {
               binaryMessenger ?? ServicesBinding.instance.defaultBinaryMessenger,
         ),
       );
+  /// Creates a [MapboxMap] instance connected to a native MapboxMapController
+  /// that has already been registered with the given [channelSuffix].
+  ///
+  /// This is used by plugins that create a native MapboxMapController
+  /// programmatically (e.g., navigation plugins that wrap their own MapView)
+  /// and need to expose the standard [MapboxMap] API to Dart.
+  static MapboxMap fromNativeController(int channelSuffix) {
+    return MapboxMap._(
+      mapboxMapsPlatform: _MapboxMapsPlatform.instance(channelSuffix),
+    );
+  }
 
   final _MapboxMapsPlatform _mapboxMapsPlatform;
 
@@ -263,10 +274,20 @@ class MapboxMap extends ChangeNotifier {
       AttributionSettingsInterface(
           binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
           messageChannelSuffix: _mapboxMapsPlatform.channelSuffix.toString());
+
+  /// The interface to access the indoor selector settings.
+  @experimental
+  late final IndoorSelectorSettingsInterface indoorSelector =
+      IndoorSelectorSettingsInterface(
+          binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
+          messageChannelSuffix: _mapboxMapsPlatform.channelSuffix.toString());
+
   late final MapboxHttpService httpService = MapboxHttpService(
       binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
       channelSuffix: _mapboxMapsPlatform.channelSuffix);
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   OnMapTapListener? onMapTapListener;
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   OnMapLongTapListener? onMapLongTapListener;
   OnMapScrollListener? onMapScrollListener;
   OnMapZoomListener? onMapZoomListener;
@@ -856,11 +877,13 @@ class MapboxMap extends ChangeNotifier {
         messageChannelSuffix: _mapboxMapsPlatform.channelSuffix.toString());
   }
 
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   void setOnMapTapListener(OnMapTapListener? onMapTapListener) {
     this.onMapTapListener = onMapTapListener;
     _setupGestures();
   }
 
+  @Deprecated('Use [MapboxMap.addInteraction] instead')
   void setOnMapLongTapListener(OnMapLongTapListener? onMapLongTapListener) {
     this.onMapLongTapListener = onMapLongTapListener;
     _setupGestures();
@@ -891,27 +914,28 @@ class MapboxMap extends ChangeNotifier {
   Future<void> setSnapshotLegacyMode(bool enable) =>
       _mapInterface.setSnapshotLegacyMode(enable);
 
-  /// Set custom headers for all Mapbox HTTP requests
+  /// Sets custom HTTP headers that are attached to every request the map makes,
+  /// regardless of host.
   ///
-  /// [headers] is a map of header names to header values
+  /// **Warning:** these headers are attached to every outgoing request,
+  /// including requests to third-party hosts referenced by the loaded style,
+  /// sources, sprites, glyphs and tiles. Placing a credential here can leak it
+  /// to hosts you do not control.
+  ///
+  /// Use `httpService.setCustomHeadersForHost` to attach headers to a specific
+  /// host only.
+  ///
+  /// [headers] is a map of header names to header values.
   ///
   /// Throws a [PlatformException] if the native implementation is not available
-  /// or if the operation fails
-  ///
-  /// Example:
-  /// ```dart
-  /// MapboxMap.setCustomHeaders({
-  ///   "Authorization": "Bearer your_secret_token",
-  /// });
-  /// ```
-  ///
-  /// Throws a [PlatformException] if the native implementation is not available
-  /// or if the operation fails
+  /// or if the operation fails.
+  @Deprecated(
+      'Headers set this way are attached to every host the map fetches from, '
+      'including third-party hosts, which can leak credentials. Use '
+      'httpService.setCustomHeadersForHost to scope headers to a specific host.')
   Future<void> setCustomHeaders(Map<String, String> headers) =>
-      MapboxHttpService(
-              binaryMessenger: _mapboxMapsPlatform.binaryMessenger,
-              channelSuffix: _mapboxMapsPlatform.channelSuffix)
-          .setCustomHeaders(headers);
+      // ignore: deprecated_member_use_from_same_package
+      httpService.setCustomHeaders(headers);
 
   /// Adds a native view annotation to the map at the specified coordinate.
   ///

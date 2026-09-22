@@ -17,6 +17,8 @@ class LineLayer extends Layer {
     List<Object>? this.lineCapExpression,
     double? this.lineCrossSlope,
     List<Object>? this.lineCrossSlopeExpression,
+    double? this.lineElevationGroundScale,
+    List<Object>? this.lineElevationGroundScaleExpression,
     LineElevationReference? this.lineElevationReference,
     List<Object>? this.lineElevationReferenceExpression,
     LineJoin? this.lineJoin,
@@ -35,6 +37,8 @@ class LineLayer extends Layer {
     List<Object>? this.lineBlurExpression,
     int? this.lineBorderColor,
     List<Object>? this.lineBorderColorExpression,
+    int? this.lineBorderGradient,
+    List<Object>? this.lineBorderGradientExpression,
     double? this.lineBorderWidth,
     List<Object>? this.lineBorderWidthExpression,
     int? this.lineColor,
@@ -113,14 +117,20 @@ class LineLayer extends Layer {
   @experimental
   List<Object>? lineCrossSlopeExpression;
 
+  /// Controls how much the elevation of lines with `line-elevation-reference` set to `sea` scales with terrain exaggeration. A value of 0 keeps the line at a fixed altitude above sea level. A value of 1 scales the elevation proportionally with terrain exaggeration.
+  /// Default value: 0. Value range: [0, 1]
+  double? lineElevationGroundScale;
+
+  /// Controls how much the elevation of lines with `line-elevation-reference` set to `sea` scales with terrain exaggeration. A value of 0 keeps the line at a fixed altitude above sea level. A value of 1 scales the elevation proportionally with terrain exaggeration.
+  /// Default value: 0. Value range: [0, 1]
+  List<Object>? lineElevationGroundScaleExpression;
+
   /// Selects the base of line-elevation. Some modes might require precomputed elevation data in the tileset.
   /// Default value: "none".
-  @experimental
   LineElevationReference? lineElevationReference;
 
   /// Selects the base of line-elevation. Some modes might require precomputed elevation data in the tileset.
   /// Default value: "none".
-  @experimental
   List<Object>? lineElevationReferenceExpression;
 
   /// The display of lines when joining.
@@ -163,28 +173,12 @@ class LineLayer extends Layer {
   @experimental
   List<Object>? lineWidthUnitExpression;
 
-  /// Vertical offset from ground, in meters. Defaults to 0. This is an experimental property with some known issues:
-  ///  - Not supported for globe projection at the moment
-  ///  - Elevated line discontinuity is possible on tile borders with terrain enabled
-  ///  - Rendering artifacts can happen near line joins and line caps depending on the line styling
-  ///  - Rendering artifacts relating to `line-opacity` and `line-blur`
-  ///  - Elevated line visibility is determined by layer order
-  ///  - Z-fighting issues can happen with intersecting elevated lines
-  ///  - Elevated lines don't cast shadows
+  /// Vertical offset from ground, in meters. Not supported for globe projection at the moment.
   /// Default value: 0.
-  @experimental
   double? lineZOffset;
 
-  /// Vertical offset from ground, in meters. Defaults to 0. This is an experimental property with some known issues:
-  ///  - Not supported for globe projection at the moment
-  ///  - Elevated line discontinuity is possible on tile borders with terrain enabled
-  ///  - Rendering artifacts can happen near line joins and line caps depending on the line styling
-  ///  - Rendering artifacts relating to `line-opacity` and `line-blur`
-  ///  - Elevated line visibility is determined by layer order
-  ///  - Z-fighting issues can happen with intersecting elevated lines
-  ///  - Elevated lines don't cast shadows
+  /// Vertical offset from ground, in meters. Not supported for globe projection at the moment.
   /// Default value: 0.
-  @experimental
   List<Object>? lineZOffsetExpression;
 
   /// Blur applied to the line, in pixels.
@@ -202,6 +196,14 @@ class LineLayer extends Layer {
   /// The color of the line border. If line-border-width is greater than zero and the alpha value of this color is 0 (default), the color for the border will be selected automatically based on the line color.
   /// Default value: "rgba(0, 0, 0, 0)".
   List<Object>? lineBorderColorExpression;
+
+  /// A gradient used to color the border of a line feature at various distances along its length. Defined using a `step` or `interpolate` expression which outputs a color for each corresponding `line-progress` input value. `line-progress` is a percentage of the line feature's total length as measured on the webmercator projected coordinate plane (a `number` between `0` and `1`). Takes precedence over `line-border-color`. Has no effect unless `line-border-width` is greater than zero. Can only be used with GeoJSON sources that specify `"lineMetrics": true`.
+  @experimental
+  int? lineBorderGradient;
+
+  /// A gradient used to color the border of a line feature at various distances along its length. Defined using a `step` or `interpolate` expression which outputs a color for each corresponding `line-progress` input value. `line-progress` is a percentage of the line feature's total length as measured on the webmercator projected coordinate plane (a `number` between `0` and `1`). Takes precedence over `line-border-color`. Has no effect unless `line-border-width` is greater than zero. Can only be used with GeoJSON sources that specify `"lineMetrics": true`.
+  @experimental
+  List<Object>? lineBorderGradientExpression;
 
   /// The width of the line border. A value of zero means no border.
   /// Default value: 0. Minimum value: 0.
@@ -392,6 +394,14 @@ class LineLayer extends Layer {
     if (lineCrossSlope != null) {
       layout["line-cross-slope"] = lineCrossSlope;
     }
+    if (lineElevationGroundScaleExpression != null) {
+      layout["line-elevation-ground-scale"] =
+          lineElevationGroundScaleExpression;
+    }
+
+    if (lineElevationGroundScale != null) {
+      layout["line-elevation-ground-scale"] = lineElevationGroundScale;
+    }
     if (lineElevationReferenceExpression != null) {
       layout["line-elevation-reference"] = lineElevationReferenceExpression;
     }
@@ -454,6 +464,12 @@ class LineLayer extends Layer {
       paint["line-border-color"] = lineBorderColorExpression;
     } else if (lineBorderColor != null) {
       paint["line-border-color"] = lineBorderColor?.toRGBA();
+    }
+
+    if (lineBorderGradientExpression != null) {
+      paint["line-border-gradient"] = lineBorderGradientExpression;
+    } else if (lineBorderGradient != null) {
+      paint["line-border-gradient"] = lineBorderGradient?.toRGBA();
     }
 
     if (lineBorderWidthExpression != null) {
@@ -636,6 +652,10 @@ class LineLayer extends Layer {
       lineCrossSlope: _optionalCast(map["layout"]["line-cross-slope"]),
       lineCrossSlopeExpression:
           _optionalCastList(map["layout"]["line-cross-slope"]),
+      lineElevationGroundScale:
+          _optionalCast(map["layout"]["line-elevation-ground-scale"]),
+      lineElevationGroundScaleExpression:
+          _optionalCastList(map["layout"]["line-elevation-ground-scale"]),
       lineElevationReference: map["layout"]["line-elevation-reference"] == null
           ? null
           : LineElevationReference.values.firstWhere((e) => e.name
@@ -675,6 +695,10 @@ class LineLayer extends Layer {
           (map["paint"]["line-border-color"] as List?)?.toRGBAInt(),
       lineBorderColorExpression:
           _optionalCastList(map["paint"]["line-border-color"]),
+      lineBorderGradient:
+          (map["paint"]["line-border-gradient"] as List?)?.toRGBAInt(),
+      lineBorderGradientExpression:
+          _optionalCastList(map["paint"]["line-border-gradient"]),
       lineBorderWidth: _optionalCast(map["paint"]["line-border-width"]),
       lineBorderWidthExpression:
           _optionalCastList(map["paint"]["line-border-width"]),

@@ -35,7 +35,7 @@ enum PuckBearing {
 }
 
 /// Defines scaling mode. Only applies to location-indicator type layers.
-/// Default value: "map".
+/// Default value: "viewport".
 enum ModelScaleMode {
   /// Model is scaled so that it's always the same size relative to other map features. The property model-scale specifies how many meters each unit in the model file should cover.
   MAP,
@@ -366,7 +366,7 @@ class LocationPuck3D {
   bool? modelReceiveShadows;
 
   /// Defines scaling mode. Only applies to location-indicator type layers.
-  /// Default value: "map".
+  /// Default value: "viewport".
   ModelScaleMode? modelScaleMode;
 
   /// Strength of the emission. There is no emission for value 0. For value 1.0, only emissive component (no shading) is displayed and values above 1.0 produce light contribution to surrounding area, for some of the parts (e.g. doors). Expressions that depend on measure-light are only supported as a global layer value (and not for each feature) when using GeoJSON or vector tile as the model layer source.
@@ -1149,6 +1149,90 @@ class LogoSettings {
   int get hashCode => Object.hashAll(_toList());
 }
 
+/// Settings for the indoor floor selector.
+class IndoorSelectorSettings {
+  IndoorSelectorSettings({
+    this.enabled,
+    this.position,
+    this.marginLeft,
+    this.marginTop,
+    this.marginRight,
+    this.marginBottom,
+  });
+
+  /// Whether the indoor selector is visible on the map.
+  /// Default value: true.
+  bool? enabled;
+
+  /// Defines where the indoor selector is positioned on the map.
+  /// Default value: "top-right".
+  OrnamentPosition? position;
+
+  /// Defines the margin to the left that the indoor selector honors.
+  /// Default value: 8.
+  double? marginLeft;
+
+  /// Defines the margin to the top that the indoor selector honors.
+  /// Default value: 60.
+  double? marginTop;
+
+  /// Defines the margin to the right that the indoor selector honors.
+  /// Default value: 8.
+  double? marginRight;
+
+  /// Defines the margin to the bottom that the indoor selector honors.
+  /// Default value: 8.
+  double? marginBottom;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      enabled,
+      position,
+      marginLeft,
+      marginTop,
+      marginRight,
+      marginBottom,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static IndoorSelectorSettings decode(Object result) {
+    result as List<Object?>;
+    return IndoorSelectorSettings(
+      enabled: result[0] as bool?,
+      position: result[1] as OrnamentPosition?,
+      marginLeft: result[2] as double?,
+      marginTop: result[3] as double?,
+      marginRight: result[4] as double?,
+      marginBottom: result[5] as double?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! IndoorSelectorSettings || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return enabled == other.enabled &&
+        position == other.position &&
+        marginLeft == other.marginLeft &&
+        marginTop == other.marginTop &&
+        marginRight == other.marginRight &&
+        marginBottom == other.marginBottom;
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => Object.hashAll(_toList());
+}
+
 class Settings_PigeonCodec extends StandardMessageCodec {
   const Settings_PigeonCodec();
   @override
@@ -1204,6 +1288,9 @@ class Settings_PigeonCodec extends StandardMessageCodec {
     } else if (value is LogoSettings) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
+    } else if (value is IndoorSelectorSettings) {
+      buffer.putUint8(145);
+      writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
     }
@@ -1250,6 +1337,8 @@ class Settings_PigeonCodec extends StandardMessageCodec {
         return AttributionSettings.decode(readValue(buffer)!);
       case 144:
         return LogoSettings.decode(readValue(buffer)!);
+      case 145:
+        return IndoorSelectorSettings.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
     }
@@ -1273,6 +1362,8 @@ class GesturesSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<GesturesSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.GesturesSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1303,6 +1394,9 @@ class GesturesSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(GesturesSettings settings) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.GesturesSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
@@ -1347,6 +1441,8 @@ class _LocationComponentSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<LocationComponentSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter._LocationComponentSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1377,6 +1473,9 @@ class _LocationComponentSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(
       LocationComponentSettings settings, bool useDefaultPuck2DIfNeeded) async {
     final String pigeonVar_channelName =
@@ -1422,6 +1521,8 @@ class ScaleBarSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<ScaleBarSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.ScaleBarSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1452,6 +1553,9 @@ class ScaleBarSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(ScaleBarSettings settings) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.ScaleBarSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
@@ -1496,6 +1600,8 @@ class CompassSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<CompassSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.CompassSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1526,6 +1632,9 @@ class CompassSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(CompassSettings settings) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.CompassSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
@@ -1570,6 +1679,8 @@ class AttributionSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<AttributionSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.AttributionSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1600,6 +1711,9 @@ class AttributionSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(AttributionSettings settings) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.AttributionSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
@@ -1644,6 +1758,8 @@ class LogoSettingsInterface {
 
   final String pigeonVar_messageChannelSuffix;
 
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
   Future<LogoSettings> getSettings() async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.LogoSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
@@ -1674,9 +1790,91 @@ class LogoSettingsInterface {
     }
   }
 
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
   Future<void> updateSettings(LogoSettings settings) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.mapbox_maps_flutter.LogoSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
+    final BasicMessageChannel<Object?> pigeonVar_channel =
+        BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture =
+        pigeonVar_channel.send(<Object?>[settings]);
+    final List<Object?>? pigeonVar_replyList =
+        await pigeonVar_sendFuture as List<Object?>?;
+    if (pigeonVar_replyList == null) {
+      throw _createConnectionError(pigeonVar_channelName);
+    } else if (pigeonVar_replyList.length > 1) {
+      throw PlatformException(
+        code: pigeonVar_replyList[0]! as String,
+        message: pigeonVar_replyList[1] as String?,
+        details: pigeonVar_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+}
+
+/// Settings for the indoor floor selector.
+class IndoorSelectorSettingsInterface {
+  /// Constructor for [IndoorSelectorSettingsInterface].  The [binaryMessenger] named argument is
+  /// available for dependency injection.  If it is left null, the default
+  /// BinaryMessenger will be used which routes to the host platform.
+  IndoorSelectorSettingsInterface(
+      {BinaryMessenger? binaryMessenger, String messageChannelSuffix = ''})
+      : pigeonVar_binaryMessenger = binaryMessenger,
+        pigeonVar_messageChannelSuffix =
+            messageChannelSuffix.isNotEmpty ? '.$messageChannelSuffix' : '';
+  final BinaryMessenger? pigeonVar_binaryMessenger;
+
+  static const MessageCodec<Object?> pigeonChannelCodec =
+      Settings_PigeonCodec();
+
+  final String pigeonVar_messageChannelSuffix;
+
+  /// Returns the currently applied settings, populated with default
+  /// values for any fields not explicitly modified via [updateSettings].
+  Future<IndoorSelectorSettings> getSettings() async {
+    final String pigeonVar_channelName =
+        'dev.flutter.pigeon.mapbox_maps_flutter.IndoorSelectorSettingsInterface.getSettings$pigeonVar_messageChannelSuffix';
+    final BasicMessageChannel<Object?> pigeonVar_channel =
+        BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final List<Object?>? pigeonVar_replyList =
+        await pigeonVar_sendFuture as List<Object?>?;
+    if (pigeonVar_replyList == null) {
+      throw _createConnectionError(pigeonVar_channelName);
+    } else if (pigeonVar_replyList.length > 1) {
+      throw PlatformException(
+        code: pigeonVar_replyList[0]! as String,
+        message: pigeonVar_replyList[1] as String?,
+        details: pigeonVar_replyList[2],
+      );
+    } else if (pigeonVar_replyList[0] == null) {
+      throw PlatformException(
+        code: 'null-error',
+        message: 'Host platform returned null value for non-null return value.',
+      );
+    } else {
+      return (pigeonVar_replyList[0] as IndoorSelectorSettings?)!;
+    }
+  }
+
+  /// Partially updates the configuration, modifying only explicitly provided fields in [settings] while preserving the rest.
+  ///
+  /// Call [getSettings] to retrieve the full resulting configuration.
+  Future<void> updateSettings(IndoorSelectorSettings settings) async {
+    final String pigeonVar_channelName =
+        'dev.flutter.pigeon.mapbox_maps_flutter.IndoorSelectorSettingsInterface.updateSettings$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel =
         BasicMessageChannel<Object?>(
       pigeonVar_channelName,

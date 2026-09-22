@@ -11,6 +11,7 @@ import 'package:mapbox_maps_example/edit_polygon_example.dart';
 import 'package:mapbox_maps_example/model_layer_interactions_example.dart';
 import 'package:mapbox_maps_example/offline_map_example.dart';
 import 'package:mapbox_maps_example/model_layer_example.dart';
+import 'package:mapbox_maps_example/model_source_example.dart';
 import 'package:mapbox_maps_example/ornaments_example.dart';
 import 'package:mapbox_maps_example/geojson_line_example.dart';
 import 'package:mapbox_maps_example/image_source_example.dart';
@@ -25,6 +26,8 @@ import 'package:mapbox_maps_example/traffic_layer_example.dart';
 import 'package:mapbox_maps_example/spinning_globe_example.dart';
 import 'package:mapbox_maps_example/traffic_route_line_example.dart';
 import 'package:mapbox_maps_example/tile_json_example.dart';
+import 'package:mapbox_maps_example/transparent_globe_example.dart';
+import 'package:mapbox_maps_example/transparent_map_example.dart';
 import 'package:mapbox_maps_example/vector_tile_source_example.dart';
 import 'package:mapbox_maps_example/view_annotation_example.dart';
 import 'package:mapbox_maps_example/view_layer_example.dart';
@@ -41,6 +44,7 @@ import 'map_texture_example.dart';
 import 'map_texture_perf_example.dart';
 import 'point_annotations_example.dart';
 import 'projection_example.dart';
+import 'rainbow_road_example.dart';
 import 'style_example.dart';
 import 'gestures_example.dart';
 import 'debug_options_example.dart';
@@ -58,8 +62,10 @@ final List<Example> _allPages = <Example>[
   ViewportExample(),
   SnapshotterExample(),
   TrafficRouteLineExample(),
+  RainbowRoadExample(),
   OfflineMapExample(),
   ModelLayerExample(),
+  ModelSourceExample(),
   DebugOptionsExample(),
   SpinningGlobeExample(),
   StandardStyleImportExample(),
@@ -90,6 +96,8 @@ final List<Example> _allPages = <Example>[
   CustomHeaderExample(),
   TrafficLayerExample(),
   CustomVectorIconsExample(),
+  TransparentMapExample(),
+  TransparentGlobeExample(),
 ];
 
 class MapsDemo extends StatelessWidget {
@@ -168,5 +176,6 @@ class MapsDemo extends StatelessWidget {
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MapboxOptions.setAccessToken(MapsDemo.ACCESS_TOKEN);
+
   runApp(MaterialApp(home: MapsDemo()));
 }

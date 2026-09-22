@@ -23,6 +23,7 @@ import com.mapbox.maps.mapbox_maps.http.CustomHttpServiceInterceptor
 import com.mapbox.maps.mapbox_maps.pigeons.AttributionSettingsInterface
 import com.mapbox.maps.mapbox_maps.pigeons.CompassSettingsInterface
 import com.mapbox.maps.mapbox_maps.pigeons.GesturesSettingsInterface
+import com.mapbox.maps.mapbox_maps.pigeons.IndoorSelectorSettingsInterface
 import com.mapbox.maps.mapbox_maps.pigeons.LogoSettingsInterface
 import com.mapbox.maps.mapbox_maps.pigeons.Projection
 import com.mapbox.maps.mapbox_maps.pigeons.ScaleBarSettingsInterface
@@ -96,13 +97,15 @@ class MapboxMapController(
   messenger: BinaryMessenger,
   channelSuffix: Long,
   pluginVersion: String,
-  eventTypes: List<Long>
+  eventTypes: List<Long>,
+  externalMapView: MapView? = null
 ) : PlatformView,
   DefaultLifecycleObserver,
   MethodChannel.MethodCallHandler {
 
-  private var mapView: FlutterMapView? = null
+  private var mapView: MapView? = null
   private var mapboxMap: MapboxMap? = null
+  private val ownsMapView: Boolean
 
   private val methodChannel: MethodChannel
   private val messenger: BinaryMessenger
@@ -121,6 +124,7 @@ class MapboxMapController(
   private val attributionController: AttributionController
   private val scaleBarController: ScaleBarController
   private val compassController: CompassController
+  private val indoorSelectorController: IndoorSelectorController
   private val viewportController: ViewportController
   private val performanceStatisticsController: PerformanceStatisticsController
   private val mapRecorderController: MapRecorderController
@@ -190,7 +194,8 @@ class MapboxMapController(
     this.messenger = messenger
     this.channelSuffix = channelSuffix.toString()
 
-    val mapView = FlutterMapView(context, mapInitOptions)
+    val mapView = externalMapView ?: FlutterMapView(context, mapInitOptions)
+    ownsMapView = externalMapView == null
     val mapboxMap = mapView.mapboxMap
     this.mapView = mapView
     this.mapboxMap = mapboxMap
@@ -208,6 +213,7 @@ class MapboxMapController(
     attributionController = AttributionController(mapView)
     scaleBarController = ScaleBarController(mapView)
     compassController = CompassController(mapView)
+    indoorSelectorController = IndoorSelectorController(mapView)
     viewportController = ViewportController(mapView.viewport, mapView.camera, context, mapboxMap)
     performanceStatisticsController = PerformanceStatisticsController(mapboxMap, this.messenger, this.channelSuffix)
     mapRecorderController = MapRecorderController(mapboxMap)
@@ -227,6 +233,7 @@ class MapboxMapController(
     AttributionSettingsInterface.setUp(messenger, attributionController, this.channelSuffix)
     ScaleBarSettingsInterface.setUp(messenger, scaleBarController, this.channelSuffix)
     CompassSettingsInterface.setUp(messenger, compassController, this.channelSuffix)
+    IndoorSelectorSettingsInterface.setUp(messenger, indoorSelectorController, this.channelSuffix)
     _ViewportMessenger.setUp(messenger, viewportController, this.channelSuffix)
     _PerformanceStatisticsApi.setUp(messenger, performanceStatisticsController, this.channelSuffix)
     _MapRecorderMessenger.setUp(messenger, mapRecorderController, this.channelSuffix)
@@ -249,14 +256,16 @@ class MapboxMapController(
 
     onFlutterViewAttachedCalled = true
 
-    val context = flutterView.context
-    val shouldDestroyOnDestroy = when (context is FlutterActivity) {
-      true -> context.shouldDestroyEngineWithHost()
-      false -> true
-    }
-    lifecycleHelper = LifecycleHelper(lifecycleProvider.getLifecycle()!!, shouldDestroyOnDestroy)
+    if (ownsMapView) {
+      val context = flutterView.context
+      val shouldDestroyOnDestroy = when (context is FlutterActivity) {
+        true -> context.shouldDestroyEngineWithHost()
+        false -> true
+      }
+      lifecycleHelper = LifecycleHelper(lifecycleProvider.getLifecycle()!!, shouldDestroyOnDestroy)
 
-    mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
+      mapView?.setViewTreeLifecycleOwner(lifecycleHelper)
+    }
   }
 
   override fun onFlutterViewDetached() {
@@ -264,9 +273,11 @@ class MapboxMapController(
 
     onFlutterViewAttachedCalled = false
 
-    lifecycleHelper?.dispose()
-    lifecycleHelper = null
-    mapView?.setViewTreeLifecycleOwner(null)
+    if (ownsMapView) {
+      lifecycleHelper?.dispose()
+      lifecycleHelper = null
+      mapView?.setViewTreeLifecycleOwner(null)
+    }
   }
 
   override fun dispose() {
@@ -278,7 +289,9 @@ class MapboxMapController(
     eventHandler.dispose()
     lifecycleHelper?.dispose()
     lifecycleHelper = null
-    mapView?.setViewTreeLifecycleOwner(null)
+    if (ownsMapView) {
+      mapView?.setViewTreeLifecycleOwner(null)
+    }
     mapView = null
     mapboxMap = null
     methodChannel.setMethodCallHandler(null)
@@ -293,6 +306,7 @@ class MapboxMapController(
     LogoSettingsInterface.setUp(messenger, null, channelSuffix)
     GesturesSettingsInterface.setUp(messenger, null, channelSuffix)
     CompassSettingsInterface.setUp(messenger, null, channelSuffix)
+    IndoorSelectorSettingsInterface.setUp(messenger, null, channelSuffix)
     ScaleBarSettingsInterface.setUp(messenger, null, channelSuffix)
     AttributionSettingsInterface.setUp(messenger, null, channelSuffix)
     _ViewportMessenger.setUp(messenger, null, channelSuffix)
@@ -413,6 +427,40 @@ class MapboxMapController(
         viewLayerController.demoteAllFeatures()
         viewAnnotationController.removeAll()
         result.success(null)
+      "map#setCustomHeadersForHost" -> {
+        try {
+          val host = call.argument<String>("host")
+          val headers = call.argument<Map<String, String>>("headers")
+          if (host.isNullOrEmpty() || headers == null) {
+            result.error("INVALID_ARGUMENTS", "host and headers cannot be null", null)
+          } else {
+            CustomHttpServiceInterceptor.getInstance().setCustomHeaders(host, headers)
+            result.success(null)
+          }
+        } catch (e: Exception) {
+          result.error("HEADER_ERROR", e.message, null)
+        }
+      }
+      "map#clearCustomHeaders" -> {
+        try {
+          CustomHttpServiceInterceptor.getInstance().clearCustomHeaders()
+          result.success(null)
+        } catch (e: Exception) {
+          result.error("HEADER_ERROR", e.message, null)
+        }
+      }
+      "map#setMaxRequestsPerHost" -> {
+        try {
+          val max = call.argument<Int>("max")
+          if (max == null) {
+            result.error("INVALID_ARGUMENTS", "max cannot be null", null)
+          } else {
+            com.mapbox.common.HttpServiceFactory.setMaxRequestsPerHost(max.toByte())
+            result.success(null)
+          }
+        } catch (e: Exception) {
+          result.error("MAX_REQUESTS_PER_HOST_ERROR", e.message, null)
+        }
       }
       else -> {
         result.notImplemented()

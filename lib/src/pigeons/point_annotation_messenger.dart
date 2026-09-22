@@ -202,7 +202,7 @@ enum TextTransform {
   LOWERCASE,
 }
 
-/// To increase the chance of placing high-priority labels on the map, you can provide an array of `text-anchor` locations: the renderer will attempt to place the label at each location, in order, before moving onto the next label. Use `text-justify: auto` to choose justification based on anchor position. To apply an offset, use the `text-radial-offset` or the two-dimensional `text-offset`.
+/// To increase the chance of placing high-priority labels on the map, you can provide an array of `text-anchor` locations: the renderer will attempt to place the label at each location, in order, before moving onto the next label. Use `text-justify: auto` to choose justification based on anchor position. To apply an offset, use the `text-radial-offset` or the two-dimensional `text-offset`. Known issue: at the moment having both `appearances` and `text-variable-anchor` in the same layer doesn't work correctly.
 enum TextVariableAnchor {
   /// The center of the text is placed closest to the anchor.
   CENTER,
@@ -422,6 +422,7 @@ class PointAnnotation {
   /// Controls the transition progress between the image variants of icon-image. Zero means the first variant is used, one is the second, and in between they are blended together. . Both images should be the same size and have the same type (either raster or vector).
   /// Default value: 0. Value range: [0, 1]
   /// Deprecated: Use `PointAnnotationManager.iconImageCrossFade` instead.
+  @Deprecated("Use [PointAnnotationManager.iconImageCrossFade] instead.")
   double? iconImageCrossFade;
 
   /// The opacity at which the icon will be drawn in case of being depth occluded. Absent value means full occlusion against terrain only.
@@ -434,7 +435,6 @@ class PointAnnotation {
 
   /// Specifies an uniform elevation from the ground, in meters.
   /// Default value: 0. Minimum value: 0.
-  /// @experimental
   double? symbolZOffset;
 
   /// The color with which the text will be drawn.
@@ -770,6 +770,7 @@ class PointAnnotationOptions {
   /// Controls the transition progress between the image variants of icon-image. Zero means the first variant is used, one is the second, and in between they are blended together. . Both images should be the same size and have the same type (either raster or vector).
   /// Default value: 0. Value range: [0, 1]
   /// Deprecated: Use `PointAnnotationManager.iconImageCrossFade` instead.
+  @Deprecated("Use [PointAnnotationManager.iconImageCrossFade] instead.")
   double? iconImageCrossFade;
 
   /// The opacity at which the icon will be drawn in case of being depth occluded. Absent value means full occlusion against terrain only.
@@ -782,7 +783,6 @@ class PointAnnotationOptions {
 
   /// Specifies an uniform elevation from the ground, in meters.
   /// Default value: 0. Minimum value: 0.
-  /// @experimental
   double? symbolZOffset;
 
   /// The color with which the text will be drawn.

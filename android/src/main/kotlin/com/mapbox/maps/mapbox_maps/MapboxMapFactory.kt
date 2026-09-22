@@ -8,6 +8,7 @@ import com.mapbox.maps.MapOptions
 import com.mapbox.maps.Style
 import com.mapbox.maps.applyDefaultParams
 import com.mapbox.maps.mapbox_maps.pigeons._MapInterface
+import com.mapbox.maps.module.telemetry.UiFramework
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.platform.PlatformView
@@ -40,8 +41,14 @@ class MapboxMapFactory(
       cameraOptions = cameraOptions?.toCameraOptions(context),
       textureView = textureView,
       styleUri = styleUri
-    )
+    ).apply {
+      uiFramework = UiFramework.FLUTTER
+    }
     mapCounter.increment()
+
+    val externalMapView = pendingMapView
+    pendingMapView = null
+
     return MapboxMapController(
       context,
       mapInitOptions,
@@ -49,12 +56,21 @@ class MapboxMapFactory(
       messenger,
       channelSuffix,
       pluginVersion,
-      eventTypes
+      eventTypes,
+      externalMapView = externalMapView
     )
   }
 
   companion object {
     @SuppressLint("RestrictedApi")
     private val mapCounter = FeatureTelemetryCounter.create("maps-mobile/flutter/map")
+
+    /**
+     * Set a MapView to be used by the next MapboxMapController instance
+     * created by this factory, instead of creating a new one internally.
+     * The value is consumed (set to null) after the next create() call.
+     */
+    @JvmStatic
+    var pendingMapView: com.mapbox.maps.MapView? = null
   }
 }
