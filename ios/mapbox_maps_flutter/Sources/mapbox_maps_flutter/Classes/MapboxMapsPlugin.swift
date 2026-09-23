@@ -72,7 +72,11 @@ public class MapboxMapsPlugin: NSObject, FlutterPlugin {
                 let point = CGPoint(x: args["x"] as? Double ?? 0,
                                     y: args["y"] as? Double ?? 0)
                 switch call.method {
-                case "tap": HeadlessMapTexture.tap(textureId: id, at: point)
+                case "tap":
+                    // The widget reports a map tap only when no view
+                    // annotation took this one.
+                    result(HeadlessMapTexture.tap(textureId: id, at: point))
+                    return
                 case "longPress": HeadlessMapTexture.longPress(textureId: id, at: point)
                 case "zoomStep":
                     HeadlessMapTexture.zoomStep(textureId: id,

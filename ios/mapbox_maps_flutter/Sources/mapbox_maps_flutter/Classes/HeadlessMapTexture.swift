@@ -43,20 +43,35 @@ final class HeadlessMapTexture: NSObject {
             eventTypes: eventTypes
         )
 
-        // Parked in the app's OWN key window, off to the side, rather than in
-        // a window of our own. A second UIWindow steals the scene and the
-        // flutter view goes to the background. Offscreen inside the existing
-        // window keeps CoreAnimation compositing the layer, which is what
-        // keeps the drawable pool recycling.
+        // Parked in the app's OWN key window, UNDER the flutter view, rather
+        // than in a window of our own. A second UIWindow steals the scene and
+        // the flutter view goes to the background.
+        //
+        // Under it, not off to the side. The map draws into drawables that
+        // CoreAnimation hands back only once it has composited them, and a
+        // layer outside the window's bounds is not composited, so they came
+        // back late or not at all: every frame then waited out the one second
+        // `nextDrawable` allows, and the whole app stalled, not just the map.
+        // Inside the bounds and covered by the opaque flutter view, the layer
+        // is composited and never seen.
         guard let key = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .flatMap({ $0.windows })
             .first(where: { $0.isKeyWindow }) else { return nil }
-        host = UIView(frame: CGRect(x: -size.width * 4, y: 0,
-                                    width: size.width, height: size.height))
+        host = UIView(frame: CGRect(origin: .zero, size: size))
         host.isUserInteractionEnabled = false
+        host.accessibilityElementsHidden = true
         host.addSubview(controller.view())
-        key.addSubview(host)
+        key.insertSubview(host, at: 0)
+
+        // `.automatic` switches to presenting inside a Core Animation
+        // transaction whenever a view annotation is on the map, to keep UIKit
+        // and the map in step. That path never calls
+        // `-[MTLCommandBuffer presentDrawable:]`, which is where the publisher
+        // catches frames, so the texture froze the moment a pin was selected.
+        // The step it keeps is moot here: the publisher composites the
+        // annotations into the same frame itself.
+        controller.mapboxMapView.presentationTransactionMode = .async
 
         publisher = MapTexturePublisher(mapView: controller.view(),
                                         textures: registrar.textures())
@@ -64,6 +79,7 @@ final class HeadlessMapTexture: NSObject {
         guard id >= 0 else { return nil }
         textureId = id
         super.init()
+        publisher.requestFrame = { [weak controller = self.controller] in controller?.map.triggerRepaint() }
     }
 
     static func create(size: CGSize,
@@ -103,13 +119,20 @@ final class HeadlessMapTexture: NSObject {
 
     // MARK: - Interactions
 
-    /// Fire the interactions this tap would have fired.
+    /// Fire what this tap would have fired, and say whether a view annotation
+    /// took it.
     ///
-    /// `addInteraction` hands the sdk a callback it dispatches from its own
-    /// tap recogniser. That recogniser never fires here, so without this the
-    /// app's pin taps are silently dead — see [InteractionsController.dispatch].
-    static func tap(textureId: Int64, at point: CGPoint) {
-        instances[textureId]?.controller.interactions?.dispatch(.tAP, at: point)
+    /// Both halves come from UIKit tap recognisers on the map view, and they
+    /// never fire here. A view annotation is asked first because on the
+    /// platform view its recogniser makes the map's own taps wait for it to
+    /// fail: a hit there is not also a tap on the map. Otherwise the
+    /// interactions `addInteraction` registered are dispatched by hand — see
+    /// [InteractionsController.dispatch].
+    static func tap(textureId: Int64, at point: CGPoint) -> Bool {
+        guard let instance = instances[textureId] else { return false }
+        if instance.controller.handleViewAnnotationTap(at: point) { return true }
+        instance.controller.interactions?.dispatch(.tAP, at: point)
+        return false
     }
 
     static func longPress(textureId: Int64, at point: CGPoint) {
@@ -195,8 +218,7 @@ final class HeadlessMapTexture: NSObject {
     static func resize(textureId: Int64, size: CGSize) {
         guard let instance = instances[textureId] else { return }
         guard size.width > 0, size.height > 0 else { return }
-        instance.host.frame = CGRect(x: -size.width * 4, y: 0,
-                                     width: size.width, height: size.height)
+        instance.host.frame = CGRect(origin: .zero, size: size)
         instance.controller.view().frame = CGRect(origin: .zero, size: size)
         instance.controller.view().layoutIfNeeded()
         instance.controller.map.triggerRepaint()

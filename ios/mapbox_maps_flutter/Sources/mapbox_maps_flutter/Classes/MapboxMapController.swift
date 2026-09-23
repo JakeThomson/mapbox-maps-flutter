@@ -22,6 +22,13 @@ public final class MapboxMapController: NSObject, FlutterPlatformView {
     /// Registered interactions, so a host with no touch delivery of its own
     /// can dispatch them (see HeadlessMapTexture).
     var interactions: InteractionsController? { interactionsController }
+
+    /// Deliver a tap to the view annotations, for a host with no touch
+    /// delivery of its own. True when one was hit, in which case the map
+    /// itself must not see the tap, exactly as on the platform view.
+    func handleViewAnnotationTap(at point: CGPoint) -> Bool {
+        viewAnnotationController.handleTap(at: point)
+    }
     private let channel: FlutterMethodChannel
     private let annotationController: AnnotationController?
     private let gesturesController: GesturesController?

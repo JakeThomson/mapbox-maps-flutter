@@ -49,14 +49,27 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     //
     // See "UIKit content" below.
 
+    private final class OverlayItem {
+        var texture: MTLTexture?
+        var pixelWidth = 0
+        var pixelHeight = 0
+    }
+
     private var overlayLink: CADisplayLink?
-    /// What the last raster was of, so an overlay that has not moved is not
-    /// rasterised again.
-    private var overlaySignature: [CGRect] = []
-    private var overlayTexture: MTLTexture?
-    private var overlayRect: CGRect = .zero
+    /// One raster per UIKit view, kept until that view's content changes.
+    private var overlayItems: [ObjectIdentifier: OverlayItem] = [:]
+    /// What the next frame draws: each raster and where, in pixels.
+    private var overlayDraws: [(texture: MTLTexture, rect: CGRect)] = []
     private var overlayPipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
     private let overlayLock = NSLock()
+    /// Until when every view is rasterised each frame regardless.
+    private var overlayLiveUntil: CFTimeInterval = 0
+    private var overlayObserver: NSObjectProtocol?
+
+    /// Asks the map for a frame. The overlay only reaches flutter on the back
+    /// of one, and the map renders on demand, so a pin animating over a map
+    /// that is standing still would otherwise never be seen.
+    var requestFrame: (() -> Void)?
 
     init(mapView: UIView, textures: FlutterTextureRegistry) {
         self.mapView = mapView
@@ -74,6 +87,11 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         Self.registry.setObject(self, forKey: layer)
         Self.hookPresentIfNeeded(device: mtk.device)
         startOverlayLink()
+        overlayObserver = NotificationCenter.default.addObserver(
+            forName: Self.overlayDidChange, object: mapView, queue: .main
+        ) { [weak self] _ in
+            self?.overlayLiveUntil = CACurrentMediaTime() + Self.overlayLiveWindow
+        }
         textureId = textures.register(self)
         return textureId
     }
@@ -81,7 +99,12 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     func stop() {
         overlayLink?.invalidate()
         overlayLink = nil
-        overlayTexture = nil
+        if let overlayObserver { NotificationCenter.default.removeObserver(overlayObserver) }
+        overlayObserver = nil
+        overlayItems.removeAll()
+        overlayLock.lock()
+        overlayDraws.removeAll()
+        overlayLock.unlock()
         if let layer = mtkView?.layer as? CAMetalLayer {
             Self.registry.removeObject(forKey: layer)
         }
@@ -216,16 +239,33 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     // composites those over the map; here nothing does, and a selected pin
     // would simply never appear.
     //
-    // So they are rasterised on the main thread and drawn over the texture on
-    // the gpu. Two things keep that cheap:
+    // So each one is rasterised on the main thread, on its own, and drawn over
+    // the texture on the gpu. What keeps that cheap is that a raster is redone
+    // only when the view's CONTENT changes:
     //
-    // The raster covers only the union of their frames, which is one small
-    // view plus a strip at the bottom, not the screen.
+    // A view that has only moved — every annotation, every frame of a pan —
+    // keeps its raster and is drawn somewhere else.
     //
-    // It is redone only when something has actually moved or is mid-animation.
-    // The logo and attribution never move, so they are rasterised once and
-    // then cost nothing; an annotation opening is redrawn per frame, which is
-    // the one case where a cached bitmap would visibly freeze.
+    // A view mid-animation is rasterised each frame. A Core Animation one says
+    // so through its layers. A SwiftUI one does not: it restyles its layers
+    // itself with nothing to observe, so whoever changes one posts
+    // [overlayDidChange] and everything is rasterised for [overlayLiveWindow].
+    //
+    // Per view rather than one raster of all of them, because the sdk parks
+    // its annotations in a transparent container the size of the map. One
+    // raster of that is a full-screen bitmap on the main thread every frame an
+    // annotation animates, which stalled the app for a second at a time.
+
+    /// Posted with a map view as the object when UIKit content inside it
+    /// changes in a way its layers cannot show.
+    static let overlayDidChange = Notification.Name("MapTexturePublisherOverlayDidChange")
+
+    /// Long enough to cover a SwiftUI spring settling after the change.
+    private static let overlayLiveWindow: CFTimeInterval = 0.8
+
+    static func setNeedsOverlay(in mapView: UIView) {
+        NotificationCenter.default.post(name: overlayDidChange, object: mapView)
+    }
 
     private func startOverlayLink() {
         let link = CADisplayLink(target: self, selector: #selector(updateOverlay))
@@ -233,60 +273,129 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         overlayLink = link
     }
 
-    /// Everything the map view draws with UIKit rather than Metal.
-    private var overlayViews: [UIView] {
-        guard let mapView else { return [] }
-        return mapView.subviews.filter {
-            !($0 is MTKView)
-                && !$0.isHidden
-                && $0.alpha > 0.01
-                && $0.bounds.width > 0
-                && $0.bounds.height > 0
-        }
+    private static func isDrawn(_ view: UIView) -> Bool {
+        !view.isHidden && view.alpha > 0.01 && view.bounds.width > 0 && view.bounds.height > 0
     }
 
-    /// True while any of these is running an animation, at which point its
-    /// pixels differ from frame to frame even if its frame does not.
-    private func isAnimating(_ views: [UIView]) -> Bool {
-        for view in views {
-            if view.layer.animationKeys()?.isEmpty == false { return true }
-            for sublayer in view.layer.sublayers ?? [] where sublayer.animationKeys()?.isEmpty == false {
-                return true
+    /// A transparent view covering the map, whose children are what is drawn.
+    private static func isContainer(_ view: UIView, in mapView: UIView) -> Bool {
+        view.layer.contents == nil
+            && (view.backgroundColor ?? .clear).cgColor.alpha == 0
+            && view.frame.width >= mapView.bounds.width
+            && view.frame.height >= mapView.bounds.height
+    }
+
+    /// Everything the map view draws with UIKit rather than Metal, with the
+    /// view that draws it: the view itself, or for an annotation the
+    /// container it sits in (see [raster]).
+    private var overlayViews: [(view: UIView, drawer: UIView)] {
+        guard let mapView else { return [] }
+        var views: [(view: UIView, drawer: UIView)] = []
+        for view in mapView.subviews where !(view is MTKView) && Self.isDrawn(view) {
+            if Self.isContainer(view, in: mapView) {
+                views += view.subviews.filter(Self.isDrawn).map { ($0, view) }
+            } else {
+                views.append((view, view))
             }
         }
-        return false
+        return views
+    }
+
+    /// The part of [layer]'s own space its content actually covers.
+    ///
+    /// Not its bounds: a selected place pin keeps a small frame and draws its
+    /// outline, lift and arrow outside it, which UIKit shows because nothing
+    /// clips it. Rasterising the bounds alone cropped the whole selection
+    /// away. Capped, so one runaway sublayer cannot make a pin screen-sized.
+    private static func drawnBounds(of root: CALayer) -> CGRect {
+        var drawn = root.bounds
+        func visit(_ layer: CALayer, depth: Int) {
+            guard !layer.masksToBounds, depth > 0 else { return }
+            for sublayer in layer.sublayers ?? [] where !sublayer.isHidden && sublayer.opacity > 0.01 {
+                drawn = drawn.union(sublayer.convert(sublayer.bounds, to: root))
+                visit(sublayer, depth: depth - 1)
+            }
+        }
+        visit(root, depth: 8)
+        return drawn.intersection(root.bounds.insetBy(dx: -maximumOverflow, dy: -maximumOverflow))
+    }
+
+    private static let maximumOverflow: CGFloat = 240
+
+    private static func isAnimating(_ layer: CALayer, depth: Int) -> Bool {
+        if layer.animationKeys()?.isEmpty == false { return true }
+        guard depth > 0 else { return false }
+        return (layer.sublayers ?? []).contains { isAnimating($0, depth: depth - 1) }
     }
 
     @objc private func updateOverlay() {
-        let views = overlayViews
-        guard !views.isEmpty, let mapView, let device = mtkView?.device else {
-            overlayLock.lock()
-            overlayTexture = nil
-            overlayRect = .zero
-            overlayLock.unlock()
-            overlaySignature = []
-            return
+        guard let mapView, let mtkView, let device = mtkView.device,
+              mtkView.bounds.width > 0 else { return }
+        // Pixels per point of the frames this is drawn onto. Not the map
+        // view's `contentScaleFactor`, which is 1 on a view that draws nothing
+        // itself: that put every overlay at a third of its size and position.
+        let scale = mtkView.drawableSize.width / mtkView.bounds.width
+        let live = CACurrentMediaTime() < overlayLiveUntil
+        var seen = Set<ObjectIdentifier>()
+        var draws: [(texture: MTLTexture, rect: CGRect)] = []
+        var redrawn = false
+
+        for (view, drawer) in overlayViews {
+            // The presentation layer, so a view mid-animation is drawn where
+            // it is on screen now rather than where it is going.
+            let layer = view.layer.presentation() ?? view.layer
+            let local = Self.drawnBounds(of: layer)
+            let inDrawer = layer.convert(local, to: drawer.layer.presentation() ?? drawer.layer)
+            let frame = drawer.convert(inDrawer, to: mapView)
+            guard frame.intersects(mapView.bounds) else { continue }
+
+            let key = ObjectIdentifier(view)
+            seen.insert(key)
+            let item = overlayItems[key] ?? OverlayItem()
+            overlayItems[key] = item
+
+            let width = Int((local.width * scale).rounded())
+            let height = Int((local.height * scale).rounded())
+            guard width > 0, height > 0 else { continue }
+            if item.texture == nil || item.pixelWidth != width || item.pixelHeight != height
+                || live || Self.isAnimating(view.layer, depth: 4) {
+                item.texture = raster(drawer, region: drawer === view ? local : inDrawer,
+                                      width: width, height: height, scale: scale, device: device)
+                item.pixelWidth = width
+                item.pixelHeight = height
+                redrawn = true
+            }
+            guard let texture = item.texture else { continue }
+            draws.append((texture, CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                                          width: frame.width * scale, height: frame.height * scale)))
         }
+        let removed = overlayItems.count > seen.count
+        overlayItems = overlayItems.filter { seen.contains($0.key) }
+        overlayLock.lock()
+        overlayDraws = draws
+        overlayLock.unlock()
+        if redrawn || removed { requestFrame?() }
+    }
 
-        let signature = views.map(\.frame)
-        guard signature != overlaySignature || isAnimating(views) else { return }
-        overlaySignature = signature
-
-        let scale = mapView.contentScaleFactor
-        var union = CGRect.null
-        for view in views { union = union.union(view.frame) }
-        union = union.intersection(mapView.bounds)
-        guard !union.isNull, union.width > 0, union.height > 0 else { return }
-
-        let width = Int((union.width * scale).rounded())
-        let height = Int((union.height * scale).rounded())
-        guard width > 0, height > 0 else { return }
-
+    /// [region] of [drawer], in [drawer]'s own space, as a texture.
+    ///
+    /// An annotation is drawn from its CONTAINER, cropped to the annotation,
+    /// rather than from itself: `drawHierarchy` clips a view to its bounds,
+    /// and a selected pin is almost all overflow. Anything else draws itself.
+    ///
+    /// `drawHierarchy`, because the pins are SwiftUI and `render(in:)` draws a
+    /// SwiftUI view blank. It needs the view in a window, which is why the host
+    /// sits under the flutter view rather than off to the side.
+    ///
+    /// A fresh texture every time rather than one rewritten in place, so a
+    /// frame the gpu is still compositing never has its pixels changed under it.
+    private func raster(_ drawer: UIView, region: CGRect, width: Int, height: Int,
+                        scale: CGFloat, device: MTLDevice) -> MTLTexture? {
         // BGRA premultiplied, which is what the destination texture is, so
         // the bytes go straight over with no conversion.
         let bytesPerRow = width * 4
         var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let hasContent: Bool = pixels.withUnsafeMutableBytes { raw -> Bool in
+        let drawn: Bool = pixels.withUnsafeMutableBytes { raw -> Bool in
             guard let base = raw.baseAddress,
                   let context = CGContext(
                     data: base,
@@ -298,64 +407,39 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                         | CGBitmapInfo.byteOrder32Little.rawValue)
             else { return false }
-
             // A bitmap context draws y-up and UIKit lays out y-down, so the
             // vertical axis is flipped before anything is drawn into it.
             context.translateBy(x: 0, y: CGFloat(height))
             context.scaleBy(x: scale, y: -scale)
-            context.translateBy(x: -union.origin.x, y: -union.origin.y)
+            context.translateBy(x: -region.minX, y: -region.minY)
             UIGraphicsPushContext(context)
-            for view in views {
-                context.saveGState()
-                context.translateBy(x: view.frame.origin.x, y: view.frame.origin.y)
-                // The model layer, not the view: `drawHierarchy` needs the
-                // view to be on screen, and this one never is.
-                (view.layer.presentation() ?? view.layer).render(in: context)
-                context.restoreGState()
+            if !drawer.drawHierarchy(in: drawer.bounds, afterScreenUpdates: false) {
+                (drawer.layer.presentation() ?? drawer.layer).render(in: context)
             }
             UIGraphicsPopContext()
             return true
         }
-        guard hasContent else { return }
+        guard drawn else { return nil }
 
-        let texture = overlayDestination(width: width, height: height, device: device)
-        guard let texture else { return }
-        pixels.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            texture.replace(region: MTLRegionMake2D(0, 0, width, height),
-                            mipmapLevel: 0,
-                            withBytes: base,
-                            bytesPerRow: bytesPerRow)
-        }
-
-        overlayLock.lock()
-        overlayTexture = texture
-        overlayRect = CGRect(x: union.origin.x * scale, y: union.origin.y * scale,
-                             width: CGFloat(width), height: CGFloat(height))
-        overlayLock.unlock()
-    }
-
-    private func overlayDestination(width: Int, height: Int, device: MTLDevice) -> MTLTexture? {
-        overlayLock.lock()
-        let existing = overlayTexture
-        overlayLock.unlock()
-        if let existing, existing.width == width, existing.height == height {
-            return existing
-        }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.usage = [.shaderRead]
-        return device.makeTexture(descriptor: descriptor)
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        pixels.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            texture.replace(region: MTLRegionMake2D(0, 0, width, height),
+                            mipmapLevel: 0, withBytes: base, bytesPerRow: bytesPerRow)
+        }
+        return texture
     }
 
     /// Draw the overlay over the copied map frame, on the same command buffer,
     /// so it lands in the same texture flutter is handed.
     private func compositeOverlay(onto destination: MTLTexture, commandBuffer: MTLCommandBuffer) {
         overlayLock.lock()
-        let source = overlayTexture
-        let rect = overlayRect
+        let draws = overlayDraws
         overlayLock.unlock()
-        guard let source, rect.width > 0, rect.height > 0,
+        guard !draws.isEmpty,
               let device = mtkView?.device,
               let pipeline = overlayPipeline(for: destination.pixelFormat, device: device)
         else { return }
@@ -365,22 +449,24 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         descriptor.colorAttachments[0].loadAction = .load
         descriptor.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.setRenderPipelineState(pipeline)
 
         // Pixels to clip space. Metal's y runs up the screen and UIKit's runs
         // down it, so the vertical span is flipped here rather than in the
         // shader.
         let w = CGFloat(destination.width)
         let h = CGFloat(destination.height)
-        var quad = SIMD4<Float>(
-            Float(rect.minX / w * 2 - 1),
-            Float(1 - rect.minY / h * 2),
-            Float(rect.maxX / w * 2 - 1),
-            Float(1 - rect.maxY / h * 2)
-        )
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setVertexBytes(&quad, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-        encoder.setFragmentTexture(source, index: 0)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        for draw in draws {
+            var quad = SIMD4<Float>(
+                Float(draw.rect.minX / w * 2 - 1),
+                Float(1 - draw.rect.minY / h * 2),
+                Float(draw.rect.maxX / w * 2 - 1),
+                Float(1 - draw.rect.maxY / h * 2)
+            )
+            encoder.setVertexBytes(&quad, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            encoder.setFragmentTexture(draw.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
         encoder.endEncoding()
     }
 

@@ -63,14 +63,27 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer == mapTapGesture else { return true }
-        let tapPoint = gestureRecognizer.location(in: mapView)
+        // No annotation hit → fail immediately, SDK gestures proceed
+        return annotationHit(at: gestureRecognizer.location(in: mapView)) != nil
+    }
+
+    /// The visible annotation under [point], in map view coordinates.
+    private func annotationHit(at point: CGPoint) -> String? {
         for (annotationId, view) in annotations {
             if view.isHidden || view.alpha == 0 { continue }
             if let visibility = visibilityObjects[annotationId], !visibility.isVisible { continue }
-            let pointInView = view.convert(tapPoint, from: mapView)
-            if view.bounds.contains(pointInView) { return true }
+            if view.bounds.contains(view.convert(point, from: mapView)) { return annotationId }
         }
-        return false  // No annotation hit → fail immediately, SDK gestures proceed
+        return nil
+    }
+
+    /// A tap on the map from a host that delivers no touches to it (see
+    /// HeadlessMapTexture), where [mapTapGesture] never fires. True when an
+    /// annotation took it.
+    func handleTap(at point: CGPoint) -> Bool {
+        guard let annotationId = annotationHit(at: point) else { return false }
+        sendTap(annotationId: annotationId)
+        return true
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -89,6 +102,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         anchor: String?,
         allowOverlap: Bool
     ) -> Result<Void, Error> {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         if annotations[id] != nil {
             return .failure(NSError(
                 domain: "ViewAnnotationController",
@@ -155,6 +169,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         viewLayerId: String? = nil,
         feature: Feature? = nil
     ) -> Result<Void, Error> {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         let perfMonitor = ViewLayerPerfMonitor.shared
 
         if annotations[id] != nil {
@@ -269,6 +284,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         longitude: Double?,
         data: [String: Any]?
     ) -> Result<Void, Error> {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         guard let oldView = annotations[id],
               let layoutName = layoutNames[id] else {
             return .failure(NSError(
@@ -683,6 +699,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     }
 
     func setVisible(id: String, visible: Bool) {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         if let annotation = viewAnnotationObjects[id] {
             annotation.visible = visible
         } else if let view = annotations[id] {
@@ -700,6 +717,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     }
 
     func remove(id: String) -> Result<Void, Error> {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         let removeStart = CACurrentMediaTime()
 
         // Check if using new ViewAnnotation API (layer feature binding)
@@ -739,6 +757,7 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
     }
 
     func removeAll() {
+        MapTexturePublisher.setNeedsOverlay(in: mapView)
         // Remove new-style annotations (layer feature binding)
         for annotation in viewAnnotationObjects.values {
             annotation.remove()
@@ -787,39 +806,33 @@ class ViewAnnotationController: NSObject, UIGestureRecognizerDelegate {
         }
     }
     
+    private func sendTap(annotationId: String) {
+        NSLog("[ViewAnnotationTap] HIT annotationId=%@ timestamp=%.3f", annotationId, CACurrentMediaTime())
+        let data = annotationData[annotationId] ?? [:]
+        let feature = annotationFeatures[annotationId] ?? nil
+
+        var featureList: [Any?]? = nil
+        if let feature = feature {
+            let idList: [Any?]? = feature.id != nil ? [feature.id!.id, feature.id!.namespace] : nil
+            let featuresetList: [Any?] = [feature.featureset.featuresetId, feature.featureset.importId, feature.featureset.layerId]
+            featureList = [idList, featuresetList, feature.geometry, feature.properties, feature.state]
+        }
+
+        tapEventChannel.invokeMethod("onTap", arguments: [
+            "annotationId": annotationId,
+            "feature": featureList as Any,
+            "data": data
+        ])
+    }
+
     @objc private func handleMapTap(_ gesture: UITapGestureRecognizer) {
         let tapPoint = gesture.location(in: mapView)
         NSLog("[ViewAnnotationTap] handleMapTap at (%.1f, %.1f) timestamp=%.3f", tapPoint.x, tapPoint.y, CACurrentMediaTime())
 
         // Phase 1: Check ViewAnnotation views (existing behavior)
-        for (annotationId, view) in annotations {
-            if view.isHidden || view.alpha == 0 {
-                continue
-            }
-            if let visibility = visibilityObjects[annotationId], !visibility.isVisible {
-                continue
-            }
-
-            let pointInView = view.convert(tapPoint, from: mapView)
-            if view.bounds.contains(pointInView) {
-                NSLog("[ViewAnnotationTap] HIT annotationId=%@ timestamp=%.3f", annotationId, CACurrentMediaTime())
-                let data = annotationData[annotationId] ?? [:]
-                let feature = annotationFeatures[annotationId] ?? nil
-
-                var featureList: [Any?]? = nil
-                if let feature = feature {
-                    let idList: [Any?]? = feature.id != nil ? [feature.id!.id, feature.id!.namespace] : nil
-                    let featuresetList: [Any?] = [feature.featureset.featuresetId, feature.featureset.importId, feature.featureset.layerId]
-                    featureList = [idList, featuresetList, feature.geometry, feature.properties, feature.state]
-                }
-
-                tapEventChannel.invokeMethod("onTap", arguments: [
-                    "annotationId": annotationId,
-                    "feature": featureList as Any,
-                    "data": data
-                ])
-                return
-            }
+        if let annotationId = annotationHit(at: tapPoint) {
+            sendTap(annotationId: annotationId)
+            return
         }
 
         // Phase 2: Check image-mode symbol layers via queryRenderedFeatures
