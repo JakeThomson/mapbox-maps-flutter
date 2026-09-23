@@ -58,8 +58,20 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     private var overlayLink: CADisplayLink?
     /// One raster per UIKit view, kept until that view's content changes.
     private var overlayItems: [ObjectIdentifier: OverlayItem] = [:]
-    /// What the next frame draws: each raster and where, in pixels.
-    private var overlayDraws: [(texture: MTLTexture, rect: CGRect)] = []
+    /// What the next frame draws: each raster, the view it is of and the
+    /// part of that view it covers, and where it was last seen, in pixels.
+    private struct OverlayDraw {
+        let texture: MTLTexture
+        weak var view: UIView?
+        let region: CGRect
+        let rect: CGRect
+    }
+    private var overlayDraws: [OverlayDraw] = []
+    /// Pixels per point of the frames the overlay is drawn onto.
+    private var overlayScale: CGFloat = 1
+    /// Orders a deferred composite after the copy it draws over.
+    private var overlaySharedEvent: MTLSharedEvent?
+    private var overlaySignal: UInt64 = 0
     private var overlayPipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
     private let overlayLock = NSLock()
     /// Until when every view is rasterised each frame regardless.
@@ -167,14 +179,51 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
                   to: entry.texture, destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
-        compositeOverlay(onto: entry.texture, commandBuffer: commandBuffer)
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            guard let self, self.textureId >= 0 else { return }
-            self.lock.lock()
-            self.latest = entry.buffer
-            self.lock.unlock()
-            self.textures.textureFrameAvailable(self.textureId)
+
+        overlayLock.lock()
+        let hasOverlay = !overlayDraws.isEmpty
+        overlayLock.unlock()
+        guard hasOverlay, let event = overlayEvent(device: device) else {
+            commandBuffer.addCompletedHandler { [weak self] _ in self?.publish(entry) }
+            return
         }
+
+        // The overlay goes on later, not on this command buffer. The sdk
+        // moves its annotations when the renderer hands it their positions,
+        // and that happens after this frame is presented: drawn now, a
+        // selected pin sits where the previous frame put it and trails every
+        // pin drawn into the map by one frame. The platform view hides the
+        // same ordering by presenting inside a Core Animation transaction,
+        // which is what texture mode has to turn off (see HeadlessMapTexture).
+        //
+        // So the copy signals an event, and the composite runs once this
+        // run loop turn has finished, on a command buffer of our own that
+        // waits for the copy on the gpu. The frame reaches flutter only with
+        // its annotations on it.
+        overlaySignal += 1
+        let value = overlaySignal
+        commandBuffer.encodeSignalEvent(event, value: value)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.textureId >= 0,
+                  let buffer = self.queue?.makeCommandBuffer() else { return }
+            buffer.encodeWaitForEvent(event, value: value)
+            self.compositeOverlay(onto: entry.texture, commandBuffer: buffer)
+            buffer.addCompletedHandler { [weak self] _ in self?.publish(entry) }
+            buffer.commit()
+        }
+    }
+
+    private func publish(_ entry: Entry) {
+        guard textureId >= 0 else { return }
+        lock.lock()
+        latest = entry.buffer
+        lock.unlock()
+        textures.textureFrameAvailable(textureId)
+    }
+
+    private func overlayEvent(device: MTLDevice) -> MTLSharedEvent? {
+        if overlaySharedEvent == nil { overlaySharedEvent = device.makeSharedEvent() }
+        return overlaySharedEvent
     }
 
     // MARK: - Buffers
@@ -337,7 +386,7 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         let scale = mtkView.drawableSize.width / mtkView.bounds.width
         let live = CACurrentMediaTime() < overlayLiveUntil
         var seen = Set<ObjectIdentifier>()
-        var draws: [(texture: MTLTexture, rect: CGRect)] = []
+        var draws: [OverlayDraw] = []
         var redrawn = false
 
         for (view, drawer) in overlayViews {
@@ -366,13 +415,16 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
                 redrawn = true
             }
             guard let texture = item.texture else { continue }
-            draws.append((texture, CGRect(x: frame.minX * scale, y: frame.minY * scale,
-                                          width: frame.width * scale, height: frame.height * scale)))
+            draws.append(OverlayDraw(
+                texture: texture, view: view, region: local,
+                rect: CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                             width: frame.width * scale, height: frame.height * scale)))
         }
         let removed = overlayItems.count > seen.count
         overlayItems = overlayItems.filter { seen.contains($0.key) }
         overlayLock.lock()
         overlayDraws = draws
+        overlayScale = scale
         overlayLock.unlock()
         if redrawn || removed { requestFrame?() }
     }
@@ -438,6 +490,7 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
     private func compositeOverlay(onto destination: MTLTexture, commandBuffer: MTLCommandBuffer) {
         overlayLock.lock()
         let draws = overlayDraws
+        let scale = overlayScale
         overlayLock.unlock()
         guard !draws.isEmpty,
               let device = mtkView?.device,
@@ -457,17 +510,43 @@ final class MapTexturePublisher: NSObject, FlutterTexture {
         let w = CGFloat(destination.width)
         let h = CGFloat(destination.height)
         for draw in draws {
+            let rect = placement(of: draw, scale: scale)
             var quad = SIMD4<Float>(
-                Float(draw.rect.minX / w * 2 - 1),
-                Float(1 - draw.rect.minY / h * 2),
-                Float(draw.rect.maxX / w * 2 - 1),
-                Float(1 - draw.rect.maxY / h * 2)
+                Float(rect.minX / w * 2 - 1),
+                Float(1 - rect.minY / h * 2),
+                Float(rect.maxX / w * 2 - 1),
+                Float(1 - rect.maxY / h * 2)
             )
             encoder.setVertexBytes(&quad, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
             encoder.setFragmentTexture(draw.texture, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
+    }
+
+    /// Where [draw] goes in THIS frame, in pixels.
+    ///
+    /// Read when the composite runs, after the sdk has placed this frame's
+    /// annotations (see [encodeCopy]), rather than taken from the overlay's
+    /// own display link, which samples them a frame or more early.
+    ///
+    /// The model layer, not the presentation layer: the sdk sets annotation
+    /// frames directly, so the model is the frame being presented, while the
+    /// presentation layer only catches up at the next commit. A view Core
+    /// Animation is moving itself is the exception.
+    private func placement(of draw: OverlayDraw, scale: CGFloat) -> CGRect {
+        guard Thread.isMainThread, let view = draw.view, let mapView,
+              view.isDescendant(of: mapView) else { return draw.rect }
+        let frame: CGRect
+        if view.layer.animationKeys()?.isEmpty == false,
+           let layer = view.layer.presentation(),
+           let mapLayer = mapView.layer.presentation() {
+            frame = layer.convert(draw.region, to: mapLayer)
+        } else {
+            frame = view.convert(draw.region, to: mapView)
+        }
+        return CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                      width: frame.width * scale, height: frame.height * scale)
     }
 
     /// Compiled from source at runtime so the plugin needs no `.metal` file in

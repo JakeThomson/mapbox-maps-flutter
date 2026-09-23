@@ -100,13 +100,44 @@ class _MapTextureState extends State<MapTexture> {
     _events?.updateSubscriptions();
   }
 
+  /// Events that arrived before [MapTexture.onMapCreated] ran.
+  ///
+  /// The host subscribes at creation, so a cached style can finish loading
+  /// before `create` has even returned — before the app has been handed its
+  /// map. Delivered then, the app's style-loaded handler runs against a null
+  /// map, adds no layers, and the style never loads again to give it a
+  /// second chance. The platform view calls onMapCreated first; this keeps
+  /// that order. Null once the map has been handed over.
+  List<VoidCallback>? _earlyEvents = [];
+
+  void _deliver(VoidCallback event) {
+    final early = _earlyEvents;
+    if (early != null) {
+      early.add(event);
+    } else {
+      event();
+    }
+  }
+
   void _updateEventListeners() {
     final events = _events;
     if (events == null) return;
-    events._onStyleLoadedListener = widget.onStyleLoadedListener;
-    events._onCameraChangeListener = widget.onCameraChangeListener;
-    events._onMapIdleListener = widget.onMapIdleListener;
-    events._onMapLoadedListener = widget.onMapLoadedListener;
+    // Null stays null: which listeners exist decides what the host sends.
+    final onStyleLoaded = widget.onStyleLoadedListener;
+    final onCameraChange = widget.onCameraChangeListener;
+    final onMapIdle = widget.onMapIdleListener;
+    final onMapLoaded = widget.onMapLoadedListener;
+    events._onStyleLoadedListener = onStyleLoaded == null
+        ? null
+        : (data) => _deliver(() => onStyleLoaded(data));
+    events._onCameraChangeListener = onCameraChange == null
+        ? null
+        : (data) => _deliver(() => onCameraChange(data));
+    events._onMapIdleListener =
+        onMapIdle == null ? null : (data) => _deliver(() => onMapIdle(data));
+    events._onMapLoadedListener = onMapLoaded == null
+        ? null
+        : (data) => _deliver(() => onMapLoaded(data));
   }
 
   @override
@@ -154,6 +185,11 @@ class _MapTextureState extends State<MapTexture> {
     final map = MapboxMap.headless(channelSuffix: suffix);
     _map = map;
     widget.onMapCreated?.call(map);
+    final early = _earlyEvents;
+    _earlyEvents = null;
+    for (final event in early ?? const <VoidCallback>[]) {
+      event();
+    }
     // NO repaint timer. Every camera change renders on its own, and a 30fps
     // pump with the map standing still is a perpetual animation: under glass
     // it redraws every surface on the screen thirty times a second. One frame
