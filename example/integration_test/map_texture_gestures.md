@@ -1,8 +1,7 @@
 # Texture gesture regression harness
 
-Run from `example/` on an iOS simulator with the example app's normal native
-Mapbox setup. Put `MAPBOX_ACCESS_TOKEN` in a local JSON define file (do not commit
-credentials), then run:
+Run from `example/` on an iOS simulator with its normal native Mapbox setup.
+Put `MAPBOX_ACCESS_TOKEN` in a local JSON define file; do not commit credentials.
 
 ```sh
 flutter pub get
@@ -12,60 +11,72 @@ flutter run -d <simulator-id> \
   --dart-define=GESTURE_VARIANT=fixed
 ```
 
-The harness forwards scripted Flutter pointer events through `MapTexture` and
-reads camera state back from native Mapbox. `MAP_GESTURE_RESULT` contains the
-measurements. The fixed run also asserts the expected camera behavior.
-`GESTURE_VARIANT` labels the run; it does not select another implementation.
-For a comparison, run the same harness in an isolated checkout with
-`lib/src/map_texture.dart` from `304d2d2`, labelled `baseline`.
+The harness forwards scripted Flutter pointer events through MapTexture and
+reads camera state back from native Mapbox. MAP_GESTURE_RESULT contains the
+measurements; the fixed run asserts expected camera behavior. GESTURE_VARIANT
+labels the run, not the implementation. To compare, use an isolated checkout
+with lib/src/map_texture.dart from 304d2d2, labelled baseline.
 
-## Recorded comparison
+## Root cause and native activation comparison
 
-`map_texture_gestures_results.json` records iPhone 17 / iOS 26.5 results with
-Flutter 3.44.7 (framework 84fc5cbb22). These runs used the Sortd host app and the
-same harness body, with only token loading and the Material import adapted to
-that host. Both runs used the updated native host; the comparison isolates the
-original versus patched Dart gesture path. Camera pitch was zero.
+Jake's original GestureDetector combines tap and scale recognition. Flutter's
+tap recognizer yields after its 18-point tolerance, allowing scale to win the
+arena. The original panBegin then used the recognition location as its origin,
+discarding the movement before recognition. A one-move swipe could therefore
+finish without moving the camera at all.
 
-| Scenario | Original Dart path | Patched path |
+Preserving that displacement solved dropped swipes but left the activation
+boundary at 19 logical pixels in our integer sweep. A separate native UIKit
+XCTest probe (../native_gesture_probe) found no pan through 9 points and pan
+recognition at 10, using the default UIPanGestureRecognizer also constructed by
+Mapbox's native dependency provider.
+
+The texture now uses a ScaleGestureRecognizer subclass that requests normal
+arena acceptance at 10 points for a single touch. Pinch/rotation keep Flutter's
+scale machinery. Small movements still resolve as taps; an ancestor that wins
+the arena still prevents the map from panning. This is scoped to the texture,
+not a global Flutter gesture-setting change.
+
+## Recorded camera comparison
+
+map_texture_gestures_results.json contains original, previous-patch and current
+results from iPhone 17 / iOS 26.5, Flutter 3.44.7 (84fc5cbb22). The Sortd host ran
+the same harness body with its own token loading and Material import. All runs
+used the updated native host and zero camera pitch.
+
+| Scenario | Original | Current patch |
 | --- | --- | --- |
-| Single move at 1, 4, 8, 12, 18 logical pixels | No movement | No movement |
-| Single move at 19, 24, 36, 37, 50 pixels | No movement | Full displacement forwarded |
-| Three 50-pixel single-move swipes | 0/3 move | 3/3 move |
-| Touch down during a fling | Continued drift | Zero measured drift |
-| Lift one finger after a pinch | Unwanted drift | Zero measured drift |
-| Incidental 2-degree twist | 2-degree rotation | No rotation |
-| Intentional 10-degree twist | 10-degree rotation | 8-degree rotation after the gate |
-| Sub-percent pinch update | No zoom change | +0.005 zoom levels |
-| Pause 40 ms, then release | Zero drift in this live run | Zero drift |
-| Overlaid button | Receives tap | Receives tap |
+| Single move through 9 points | No movement | No movement |
+| Single move at 10, 12, 18 points | No movement (12/18 measured) | Camera moves |
+| Single move at 19/24/36/37/50 points | No movement | Camera moves |
+| Three repeated 50-point swipes | 0/3 move | 3/3 move |
+| Touch down during fling | Continued drift | Zero measured drift |
+| Lift one finger after pinch | Unwanted drift | Zero measured drift |
+| Incidental 2-degree twist | Rotates 2 degrees | No rotation |
+| Intentional 10-degree twist | Rotates 10 degrees | Rotates 8 degrees after gate |
+| Sub-percent pinch update | No zoom response | +0.005 zoom levels |
+| Pause 40 ms, then release | No drift in this live run | No drift |
+| Overlay control | Receives tap | Receives tap |
 
-Center deltas in the JSON are summed absolute longitude/latitude differences,
-not screen pixels or meters. The 19-pixel recognition result is specific to the
-recorded Flutter configuration: it reflects the tap/scale gesture arena, not
-just the standalone scale recognizer's pan-slop constant. The fix stops motion
-at touch-down and preserves displacement when a drag wins; it keeps tap
-recognition intact.
+JSON center deltas are summed absolute longitude/latitude differences, not
+meters or screen pixels. The original sweep omitted 9/10-point samples; its
+recognizer path and the 12/18-point samples establish the delayed activation.
 
-## Native-source audit
+## Native source audit and test coverage
 
-Compared with the installed Mapbox iOS 11.31.0 sources:
+Compared against installed Mapbox iOS 11.31.0:
+- RotateGestureHandler: ported its 3/5/7/15-degree angle/speed gates, with tests
+  for each speed band and deliberately slow rotation.
+- PanGestureHandler: added the 1/30-second release pause cutoff. A deterministic
+  40 ms pause produced a stale fling before the fix; both live runs happened
+  not to drift, so the unit regression is the evidence for that case.
+- PanGestureHandler: moved the fling anchor to at least 3/4 of the view height.
+- GestureDecelerationCameraAnimator: existing per-frame displacement,
+  per-millisecond decay factor and 35-point/second stopping rule match its code.
 
-- `RotateGestureHandler`: ported the 3/5/7/15-degree angle gates and angular
-  speed conditions. Unit cases cover each speed band and slow rotation.
-- `PanGestureHandler`: added the native 1/30-second release timeout. A synthetic
-  40 ms pause still produced a fling request before this addition, and does not
-  afterward. The live baseline happened not to drift, so the deterministic test
-  is the evidence for this case.
-- `PanGestureHandler`: moved the fling anchor to at least 3/4 of the view height,
-  matching its horizon-sensitivity mitigation.
-- `GestureDecelerationCameraAnimator`: the existing host already uses the same
-  per-frame displacement, per-millisecond normal deceleration factor and
-  35-point/second stop condition. That decay equation was not retuned.
-
-Run `flutter test` at the package root for the 52-test suite, including real
-Flutter gesture recognition, release/cancellation cases and rotation gates.
-The harness compares the two texture implementations. It does not inject UIKit
-touches into the App Store build or establish identical device feel; the native
-anchor change is source-aligned and simulator-compiled, not a pitched-map
-before/after measurement.
+Run flutter test at the package root. Coverage includes activation, small tap
+movement, an ancestor winning the arena, overlay taps, double tap, quick zoom,
+rotation, cancellation, paused release and multi-touch fling suppression.
+The native probe measures UIKit recognition; the map harness measures texture
+camera behavior. Neither is an App Store build comparison. The pitched fling
+anchor is source-aligned and compiled, not measured against a native map here.

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
@@ -370,7 +371,7 @@ void main() {
     await pumpMap(tester);
     final origin = tester.getCenter(find.byType(Texture));
     final recognised = <int>[];
-    for (final distance in [1, 4, 8, 12, 18, 19, 24, 36, 37, 50]) {
+    for (final distance in [1, 4, 8, 9, 10, 12, 18, 19, 24, 36, 37, 50]) {
       calls.clear();
       final finger = await tester.startGesture(origin);
       await finger.moveBy(Offset(distance.toDouble(), 0),
@@ -384,7 +385,8 @@ void main() {
       await finger.cancel(timeStamp: const Duration(milliseconds: 20));
     }
     // A tap must remain possible; recognition must not discard a short swipe.
-    expect(recognised, isNot(contains(1)));
+    expect(recognised, isNot(contains(9)));
+    expect(recognised, contains(10));
     expect(recognised, contains(50));
     // ignore: avoid_print
     print('PAN_RECOGNITION_DISTANCES $recognised');
@@ -394,16 +396,28 @@ void main() {
       in <int, int?>{100: null, 20: 3, 10: 5, 5: 7, 1: 15}.entries) {
     testWidgets('rotation gate at ${entry.key} ms per degree', (tester) async {
       await pumpMap(tester);
-      final detector = tester.widget<GestureDetector>(find.descendant(
-          of: find.byType(MapTexture), matching: find.byType(GestureDetector)));
-      detector.onScaleStart!(ScaleStartDetails(
+      final raw = tester.widget<RawGestureDetector>(find.descendant(
+          of: find.byType(MapTexture),
+          matching: find.byType(RawGestureDetector)));
+      ScaleGestureRecognizer? scale;
+      for (final factory in raw.gestures.values) {
+        final recognizer = factory.constructor();
+        if (recognizer is ScaleGestureRecognizer) {
+          factory.initializer(recognizer);
+          scale = recognizer;
+        } else {
+          recognizer.dispose();
+        }
+      }
+      final detector = scale!;
+      detector.onStart!(ScaleStartDetails(
           focalPoint: const Offset(160, 320),
           pointerCount: 2,
           sourceTimeStamp: Duration.zero));
       calls.clear();
       int? firstRotation;
       for (var degrees = 1; degrees <= 20; degrees++) {
-        detector.onScaleUpdate!(ScaleUpdateDetails(
+        detector.onUpdate!(ScaleUpdateDetails(
             focalPoint: const Offset(160, 320),
             pointerCount: 2,
             rotation: degrees * math.pi / 180,
@@ -419,8 +433,74 @@ void main() {
         // its threshold; activation must occur within the next sample.
         expect(firstRotation, inInclusiveRange(entry.value!, entry.value! + 1));
       }
-      detector.onScaleEnd!(ScaleEndDetails());
+      detector.onEnd!(ScaleEndDetails());
+      detector.dispose();
       await unmount(tester);
     });
   }
+  testWidgets('sub-threshold touch movement remains a map tap', (tester) async {
+    await pumpMap(tester);
+    calls.clear();
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    await finger.moveBy(const Offset(8, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await finger.up(timeStamp: const Duration(milliseconds: 32));
+    await tester.pump();
+    expect(callNamed(calls, 'tap'), isNotNull);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('an ancestor that wins the gesture prevents map panning',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+        home: RawGestureDetector(
+      gestures: {
+        EagerGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<EagerGestureRecognizer>(
+                () => EagerGestureRecognizer(), (_) {}),
+      },
+      child: const MapTexture(),
+    )));
+    await tester.pump();
+    await tester.pump();
+    calls.clear();
+    await tester.drag(find.byType(Texture), const Offset(30, 0));
+    await tester.pump();
+    expect(callNamed(calls, 'panBegin'), isNull);
+    expect(callNamed(calls, 'panUpdate'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('double tap still zooms after using the native pan boundary',
+      (tester) async {
+    await pumpMap(tester);
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    calls.clear();
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    expect(callNamed(calls, 'zoomStep')!.arguments['delta'], 1.0);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('double tap and drag remains quick zoom, not a pan or fling',
+      (tester) async {
+    await pumpMap(tester);
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    calls.clear();
+    final origin = tester.getCenter(find.byType(Texture));
+    final finger = await tester.startGesture(origin);
+    await finger.moveBy(const Offset(0, 10),
+        timeStamp: const Duration(milliseconds: 16));
+    await finger.moveBy(const Offset(0, 20),
+        timeStamp: const Duration(milliseconds: 32));
+    await finger.up(timeStamp: const Duration(milliseconds: 40));
+    await tester.pump();
+    expect(callNamed(calls, 'zoomBy'), isNotNull);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
 }

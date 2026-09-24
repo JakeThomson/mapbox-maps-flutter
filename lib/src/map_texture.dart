@@ -387,133 +387,194 @@ class _MapTextureState extends State<MapTexture> {
           onPointerMove: _pointerMove,
           onPointerUp: _pointerUp,
           onPointerCancel: _pointerUp,
-          child: GestureDetector(
+          child: RawGestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapUp: (d) => _tap(d.localPosition),
-            onScaleStart: (d) {
-              _lastRotation = 0;
-              _discardedRotation = 0;
-              _rotating = false;
-              _rotationTimestamp = d.sourceTimeStamp;
-              _lastScale = 1;
-              _lastFocal = d.localFocalPoint;
-              _longPress?.cancel();
-              // Double tap and hold, then drag: the sdk's one-finger quick
-              // zoom. Down zooms in, up zooms out, about the first touch.
-              final down = _secondTouchDown;
-              if (down != null && d.pointerCount == 1) {
-                _secondTouchDown = null;
-                _lastTap = null;
-                _lastTapAt = null;
-                _quickZoomAnchor = down;
-                _quickZoomY = down.dy;
-                return;
-              }
-              final origin = d.localFocalPoint;
-              _longPress =
-                  Timer(_longPressDelay, () => _tap(origin, long: true));
-              final panOrigin = _panOrigin ?? d.localFocalPoint;
-              _send('panBegin', {'x': panOrigin.dx, 'y': panOrigin.dy});
-              // onScaleStart reports the recognition point, not touch-down.
-              // Keep the displacement that crossed slop, including a quick
-              // swipe with only one move event before release.
-              _send('panUpdate', {
-                'x': d.localFocalPoint.dx,
-                'y': d.localFocalPoint.dy,
-              });
-            },
-            onScaleUpdate: (d) {
-              final anchor = _quickZoomAnchor;
-              final lastY = _quickZoomY;
-              if (anchor != null && lastY != null) {
-                final dy = d.localFocalPoint.dy - lastY;
-                _quickZoomY = d.localFocalPoint.dy;
-                _send('zoomBy', {
-                  'delta': dy / _quickZoomPointsPerLevel,
-                  'x': anchor.dx,
-                  'y': anchor.dy,
-                });
-                return;
-              }
-              final x = d.localFocalPoint.dx;
-              final y = d.localFocalPoint.dy;
-              final start = _lastFocal;
-              if (_longPress != null &&
-                  (start == null ||
-                      (start - d.localFocalPoint).distance > 10)) {
-                _longPress?.cancel();
-                _longPress = null;
-              }
+            gestures: {
+              TapGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+                () => TapGestureRecognizer(),
+                (instance) {
+                  instance.gestureSettings =
+                      MediaQuery.maybeGestureSettingsOf(context);
+                  instance.onTapUp = (d) => _tap(d.localPosition);
+                },
+              ),
+              _TextureScaleGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                      _TextureScaleGestureRecognizer>(
+                () => _TextureScaleGestureRecognizer(),
+                (instance) {
+                  instance.gestureSettings =
+                      MediaQuery.maybeGestureSettingsOf(context);
+                  instance.onStart = (d) {
+                    _lastRotation = 0;
+                    _discardedRotation = 0;
+                    _rotating = false;
+                    _rotationTimestamp = d.sourceTimeStamp;
+                    _lastScale = 1;
+                    _lastFocal = d.localFocalPoint;
+                    _longPress?.cancel();
+                    // Double tap and hold, then drag: the sdk's one-finger quick
+                    // zoom. Down zooms in, up zooms out, about the first touch.
+                    final down = _secondTouchDown;
+                    if (down != null && d.pointerCount == 1) {
+                      _secondTouchDown = null;
+                      _lastTap = null;
+                      _lastTapAt = null;
+                      _quickZoomAnchor = down;
+                      _quickZoomY = down.dy;
+                      return;
+                    }
+                    final origin = d.localFocalPoint;
+                    _longPress =
+                        Timer(_longPressDelay, () => _tap(origin, long: true));
+                    final panOrigin = _panOrigin ?? d.localFocalPoint;
+                    _send('panBegin', {'x': panOrigin.dx, 'y': panOrigin.dy});
+                    // onScaleStart reports the recognition point, not touch-down.
+                    // Keep the displacement that crossed slop, including a quick
+                    // swipe with only one move event before release.
+                    _send('panUpdate', {
+                      'x': d.localFocalPoint.dx,
+                      'y': d.localFocalPoint.dy,
+                    });
+                  };
+                  instance.onUpdate = (d) {
+                    final anchor = _quickZoomAnchor;
+                    final lastY = _quickZoomY;
+                    if (anchor != null && lastY != null) {
+                      final dy = d.localFocalPoint.dy - lastY;
+                      _quickZoomY = d.localFocalPoint.dy;
+                      _send('zoomBy', {
+                        'delta': dy / _quickZoomPointsPerLevel,
+                        'x': anchor.dx,
+                        'y': anchor.dy,
+                      });
+                      return;
+                    }
+                    final x = d.localFocalPoint.dx;
+                    final y = d.localFocalPoint.dy;
+                    final start = _lastFocal;
+                    if (_longPress != null &&
+                        (start == null ||
+                            (start - d.localFocalPoint).distance > 10)) {
+                      _longPress?.cancel();
+                      _longPress = null;
+                    }
 
-              // two fingers moving together, vertically, with no spread and no
-              // twist, is the sdk's pitch gesture. checked first because the
-              // same fingers would otherwise read as an ordinary pan.
-              final twoFingers = d.pointerCount >= 2;
-              final still =
-                  (d.scale - 1).abs() < 0.02 && d.rotation.abs() < 0.02;
-              if (twoFingers && still && _lastFocal != null) {
-                final dy = y - _lastFocal!.dy;
-                if (dy.abs() > 0.5) {
-                  _send('pitchBy', {'delta': -dy * 0.25});
-                  _lastFocal = Offset(x, y);
-                  return;
-                }
-              }
-              _lastFocal = Offset(x, y);
+                    // two fingers moving together, vertically, with no spread and no
+                    // twist, is the sdk's pitch gesture. checked first because the
+                    // same fingers would otherwise read as an ordinary pan.
+                    final twoFingers = d.pointerCount >= 2;
+                    final still =
+                        (d.scale - 1).abs() < 0.02 && d.rotation.abs() < 0.02;
+                    if (twoFingers && still && _lastFocal != null) {
+                      final dy = y - _lastFocal!.dy;
+                      if (dy.abs() > 0.5) {
+                        _send('pitchBy', {'delta': -dy * 0.25});
+                        _lastFocal = Offset(x, y);
+                        return;
+                      }
+                    }
+                    _lastFocal = Offset(x, y);
 
-              _send('panUpdate', {'x': x, 'y': y});
-              // The gesture's scale is cumulative from its start and zoom is
-              // log2 of scale, so the step is the ratio since the last update:
-              // spreading the fingers to twice the distance is exactly one
-              // zoom level, however many updates it took.
-              if (d.scale > 0 && d.scale != _lastScale) {
-                final delta = math.log(d.scale / _lastScale) / math.ln2;
-                _send('zoomBy', {'delta': delta, 'x': x, 'y': y});
-                _lastScale = d.scale;
-              }
-              _rotate(d);
-            },
-            onScaleEnd: (d) {
-              _longPress?.cancel();
-              _longPress = null;
-              _send('panEnd');
-              if (_quickZoomAnchor != null) {
-                // A quick zoom stops where it is let go; it never flings.
-                _quickZoomAnchor = null;
-                _quickZoomY = null;
-                return;
-              }
-              // A flick should keep going. The host decays it with the sdk's
-              // own physics; below its floor this is a no-op.
-              final focal = _lastFocal;
-              if (focal == null ||
-                  d.pointerCount != 0 ||
-                  _hadMultiplePointers ||
-                  _cancelled) {
-                return;
-              }
-              // Match the native pan handler: a pause before release is not
-              // a flick, even if Flutter retains velocity from the last move.
-              final lastMove = _lastPanMoveTimestamp;
-              final release = _releaseTimestamp;
-              if (lastMove == null ||
-                  release == null ||
-                  release < lastMove ||
-                  (release - lastMove).inMicroseconds >= 1000000 / 30) {
-                return;
-              }
-              final v = d.velocity.pixelsPerSecond;
-              _send('fling', {
-                'vx': v.dx,
-                'vy': v.dy,
-                'x': focal.dx,
-                'y': focal.dy,
-              });
+                    _send('panUpdate', {'x': x, 'y': y});
+                    // The gesture's scale is cumulative from its start and zoom is
+                    // log2 of scale, so the step is the ratio since the last update:
+                    // spreading the fingers to twice the distance is exactly one
+                    // zoom level, however many updates it took.
+                    if (d.scale > 0 && d.scale != _lastScale) {
+                      final delta = math.log(d.scale / _lastScale) / math.ln2;
+                      _send('zoomBy', {'delta': delta, 'x': x, 'y': y});
+                      _lastScale = d.scale;
+                    }
+                    _rotate(d);
+                  };
+                  instance.onEnd = (d) {
+                    _longPress?.cancel();
+                    _longPress = null;
+                    _send('panEnd');
+                    if (_quickZoomAnchor != null) {
+                      // A quick zoom stops where it is let go; it never flings.
+                      _quickZoomAnchor = null;
+                      _quickZoomY = null;
+                      return;
+                    }
+                    // A flick should keep going. The host decays it with the sdk's
+                    // own physics; below its floor this is a no-op.
+                    final focal = _lastFocal;
+                    if (focal == null ||
+                        d.pointerCount != 0 ||
+                        _hadMultiplePointers ||
+                        _cancelled) {
+                      return;
+                    }
+                    // Match the native pan handler: a pause before release is not
+                    // a flick, even if Flutter retains velocity from the last move.
+                    final lastMove = _lastPanMoveTimestamp;
+                    final release = _releaseTimestamp;
+                    if (lastMove == null ||
+                        release == null ||
+                        release < lastMove ||
+                        (release - lastMove).inMicroseconds >= 1000000 / 30) {
+                      return;
+                    }
+                    final v = d.velocity.pixelsPerSecond;
+                    _send('fling', {
+                      'vx': v.dx,
+                      'vy': v.dy,
+                      'x': focal.dx,
+                      'y': focal.dy,
+                    });
+                  };
+                },
+              ),
             },
             child: texture,
           ),
         );
       },
     );
+  }
+}
+
+/// UIKit's default pan recognizer begins at about 10 points in the native
+/// simulator probe. Flutter's tap/scale arena otherwise waits for the tap's
+/// 18-point tolerance to expire. Keep the standard scale machinery and arena,
+/// but let a single touch request pan recognition at the native boundary.
+class _TextureScaleGestureRecognizer extends ScaleGestureRecognizer {
+  final Map<int, Offset> _touchOrigins = {};
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _touchOrigins[event.pointer] = event.position;
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    super.handleEvent(event);
+    final origin = _touchOrigins[event.pointer];
+    if (event is PointerMoveEvent &&
+        event.kind == ui.PointerDeviceKind.touch &&
+        _touchOrigins.length == 1 &&
+        origin != null &&
+        (event.position - origin).distance >= 10) {
+      resolve(GestureDisposition.accepted);
+    }
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _touchOrigins.remove(event.pointer);
+    }
+  }
+
+  @override
+  void rejectGesture(int pointer) {
+    _touchOrigins.remove(pointer);
+    super.rejectGesture(pointer);
+  }
+
+  @override
+  void dispose() {
+    _touchOrigins.clear();
+    super.dispose();
   }
 }

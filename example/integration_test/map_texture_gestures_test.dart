@@ -127,7 +127,7 @@ void main() {
       // Measure the actual activation boundary rather than inferring it from
       // Flutter's constants (the tap/scale arena affects recognition too).
       final activation = <String, double>{};
-      for (final distance in [1, 4, 8, 12, 18, 19, 24, 36, 37, 50]) {
+      for (final distance in [1, 4, 8, 9, 10, 12, 18, 19, 24, 36, 37, 50]) {
         await reset();
         final before = await camera();
         final finger = await down(origin, 1);
@@ -268,8 +268,8 @@ void main() {
         expect(filterTaps, 1);
         expect(results['paused_release_drift'], lessThan(0.000001));
         expect(results['intentional_rotation_degrees'], greaterThan(1));
-        expect(activation['18'], lessThan(0.000001));
-        expect(activation['19'], greaterThan(0.00001));
+        expect(activation['9'], lessThan(0.000001));
+        expect(activation['10'], greaterThan(0.00001));
       }
     },
     timeout: const Timeout(Duration(minutes: 3)),
