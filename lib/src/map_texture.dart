@@ -78,7 +78,6 @@ class _MapTextureState extends State<MapTexture> {
   ui.Size? _size;
   bool _creating = false;
   double _lastRotation = 0;
-  double _discardedRotation = 0;
   bool _rotating = false;
   Duration? _rotationTimestamp;
   final Map<int, Offset> _pointers = {};
@@ -331,23 +330,33 @@ class _MapTextureState extends State<MapTexture> {
     _rotationTimestamp = timestamp;
     if (details.pointerCount < 2) return;
     if (!_rotating) {
-      _discardedRotation += delta.abs();
-      if (timestamp == null || previous == null || timestamp <= previous) {
-        return;
-      }
-      final angle = _discardedRotation * 180 / math.pi;
-      final speed = delta.abs() *
-          180 /
-          math.pi /
-          ((timestamp - previous).inMicroseconds / 1000);
-      // Mapbox iOS RotateGestureHandler's angle/velocity gate. Discard the
-      // pre-recognition angle rather than snapping it into the first update.
-      if (angle < 3 ||
-          speed < 0.04 ||
-          (speed > 0.07 && angle < 5) ||
-          (speed > 0.15 && angle < 7) ||
-          (speed > 0.5 && angle < 15)) {
-        return;
+      // The gate reads the net twist since the segment began, as the native
+      // handler reads UIRotationGestureRecognizer.rotation. Summing each
+      // update's magnitude instead would let back-and-forth jitter add up
+      // to a rotation the fingers never made.
+      final net = details.rotation;
+      final angle =
+          math.atan2(math.sin(net), math.cos(net)).abs() * 180 / math.pi;
+      if (timestamp == null || previous == null) {
+        // No clock to judge speed by (synthesised events). Rotation must
+        // still be reachable, so apply the strictest angle of the gate.
+        if (angle < 15) return;
+      } else {
+        if (timestamp <= previous) return;
+        final speed = delta.abs() *
+            180 /
+            math.pi /
+            ((timestamp - previous).inMicroseconds / 1000);
+        // Mapbox iOS RotateGestureHandler's angle/velocity gate. Discard the
+        // pre-recognition angle rather than snapping it into the first
+        // update.
+        if (angle < 3 ||
+            speed < 0.04 ||
+            (speed > 0.07 && angle < 5) ||
+            (speed > 0.15 && angle < 7) ||
+            (speed > 0.5 && angle < 15)) {
+          return;
+        }
       }
       _rotating = true;
     }
@@ -406,9 +415,11 @@ class _MapTextureState extends State<MapTexture> {
                 (instance) {
                   instance.gestureSettings =
                       MediaQuery.maybeGestureSettingsOf(context);
+                  instance.viewWidth = MediaQuery.maybeSizeOf(context)?.width;
+                  instance.textDirection =
+                      Directionality.maybeOf(context) ?? TextDirection.ltr;
                   instance.onStart = (d) {
                     _lastRotation = 0;
-                    _discardedRotation = 0;
                     _rotating = false;
                     _rotationTimestamp = d.sourceTimeStamp;
                     _lastScale = 1;
@@ -541,12 +552,39 @@ class _MapTextureState extends State<MapTexture> {
 /// simulator probe. Flutter's tap/scale arena otherwise waits for the tap's
 /// 18-point tolerance to expire. Keep the standard scale machinery and arena,
 /// but let a single touch request pan recognition at the native boundary.
+///
+/// Except within [edgeSwipeInset] of the screen's leading edge. That is where
+/// edge swipes live (the iOS back swipe, an app's side drawer), and they
+/// claim a drag at the 18-point touch slop; claiming at 10 there would take
+/// every one of them. UIKit gives screen-edge recognizers the same priority
+/// over a map's pan. A touch that starts in the strip falls back to the
+/// ordinary arena, so the map still pans once nothing else wants the drag.
 class _TextureScaleGestureRecognizer extends ScaleGestureRecognizer {
+  /// Matches the width of a typical edge-swipe strip; UIKit's own
+  /// screen-edge recognizer reacts within about the same distance.
+  static const double edgeSwipeInset = 24;
+
   final Map<int, Offset> _touchOrigins = {};
+  final Set<int> _edgePointers = {};
+
+  /// Width of the view in logical pixels, to find the trailing edge in RTL.
+  double? viewWidth;
+  TextDirection textDirection = TextDirection.ltr;
+
+  bool _inLeadingEdge(Offset position) {
+    switch (textDirection) {
+      case TextDirection.ltr:
+        return position.dx < edgeSwipeInset;
+      case TextDirection.rtl:
+        final width = viewWidth;
+        return width != null && position.dx > width - edgeSwipeInset;
+    }
+  }
 
   @override
   void addAllowedPointer(PointerDownEvent event) {
     _touchOrigins[event.pointer] = event.position;
+    if (_inLeadingEdge(event.position)) _edgePointers.add(event.pointer);
     super.addAllowedPointer(event);
   }
 
@@ -557,24 +595,31 @@ class _TextureScaleGestureRecognizer extends ScaleGestureRecognizer {
     if (event is PointerMoveEvent &&
         event.kind == ui.PointerDeviceKind.touch &&
         _touchOrigins.length == 1 &&
+        !_edgePointers.contains(event.pointer) &&
         origin != null &&
         (event.position - origin).distance >= 10) {
       resolve(GestureDisposition.accepted);
     }
     if (event is PointerUpEvent || event is PointerCancelEvent) {
-      _touchOrigins.remove(event.pointer);
+      _forget(event.pointer);
     }
   }
 
   @override
   void rejectGesture(int pointer) {
-    _touchOrigins.remove(pointer);
+    _forget(pointer);
     super.rejectGesture(pointer);
+  }
+
+  void _forget(int pointer) {
+    _touchOrigins.remove(pointer);
+    _edgePointers.remove(pointer);
   }
 
   @override
   void dispose() {
     _touchOrigins.clear();
+    _edgePointers.clear();
     super.dispose();
   }
 }

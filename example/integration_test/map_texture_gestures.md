@@ -19,7 +19,7 @@ with lib/src/map_texture.dart from 304d2d2, labelled baseline.
 
 ## Root cause and native activation comparison
 
-Jake's original GestureDetector combines tap and scale recognition. Flutter's
+The previous GestureDetector combined tap and scale recognition. Flutter's
 tap recognizer yields after its 18-point tolerance, allowing scale to win the
 arena. The original panBegin then used the recognition location as its origin,
 discarding the movement before recognition. A one-move swipe could therefore

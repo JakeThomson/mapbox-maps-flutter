@@ -1,7 +1,7 @@
 # UIKit pan activation probe
 
 This isolated UIKit app measures default UIPanGestureRecognizer activation with
-an ordinary competing UITapGestureRecognizer. Jake's native Mapbox SDK constructs
+an ordinary competing UITapGestureRecognizer. The native Mapbox SDK constructs
 a default UIPanGestureRecognizer in MapViewDependencyProvider; this probe isolates
 that recognizer rather than loading map tiles or Flutter.
 

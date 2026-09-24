@@ -66,6 +66,25 @@ void main() {
     return null;
   }
 
+  /// A standalone copy of the map's scale recogniser, wired to the same
+  /// handlers, so a test can feed it exact rotations and timestamps.
+  ScaleGestureRecognizer scaleRecognizer(WidgetTester tester) {
+    final raw = tester.widget<RawGestureDetector>(find.descendant(
+        of: find.byType(MapTexture),
+        matching: find.byType(RawGestureDetector)));
+    ScaleGestureRecognizer? scale;
+    for (final factory in raw.gestures.values) {
+      final recognizer = factory.constructor();
+      if (recognizer is ScaleGestureRecognizer) {
+        factory.initializer(recognizer);
+        scale = recognizer;
+      } else {
+        recognizer.dispose();
+      }
+    }
+    return scale!;
+  }
+
   testWidgets('creates the map at the size of its constraints', (tester) async {
     await pumpMap(tester, size: const ui.Size(300, 500));
     final create = callNamed(calls, 'create');
@@ -396,20 +415,7 @@ void main() {
       in <int, int?>{100: null, 20: 3, 10: 5, 5: 7, 1: 15}.entries) {
     testWidgets('rotation gate at ${entry.key} ms per degree', (tester) async {
       await pumpMap(tester);
-      final raw = tester.widget<RawGestureDetector>(find.descendant(
-          of: find.byType(MapTexture),
-          matching: find.byType(RawGestureDetector)));
-      ScaleGestureRecognizer? scale;
-      for (final factory in raw.gestures.values) {
-        final recognizer = factory.constructor();
-        if (recognizer is ScaleGestureRecognizer) {
-          factory.initializer(recognizer);
-          scale = recognizer;
-        } else {
-          recognizer.dispose();
-        }
-      }
-      final detector = scale!;
+      final detector = scaleRecognizer(tester);
       detector.onStart!(ScaleStartDetails(
           focalPoint: const Offset(160, 320),
           pointerCount: 2,
@@ -501,6 +507,133 @@ void main() {
     expect(callNamed(calls, 'zoomBy'), isNotNull);
     expect(callNamed(calls, 'panBegin'), isNull);
     expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('rotation jitter that nets under three degrees never rotates',
+      (tester) async {
+    await pumpMap(tester);
+    final detector = scaleRecognizer(tester);
+    detector.onStart!(ScaleStartDetails(
+        focalPoint: const Offset(160, 320),
+        pointerCount: 2,
+        sourceTimeStamp: Duration.zero));
+    calls.clear();
+    // One degree each way, 16 ms apart: every step sits in the slowest speed
+    // band, so only the 3 degree floor applies. Summing the magnitudes would
+    // pass it on the fourth step; the fingers never twist more than a degree.
+    for (var i = 1; i <= 12; i++) {
+      final degrees = i.isOdd ? 1 : 0;
+      detector.onUpdate!(ScaleUpdateDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          rotation: degrees * math.pi / 180,
+          sourceTimeStamp: Duration(milliseconds: 16 * i)));
+    }
+    expect(callNamed(calls, 'rotateBy'), isNull);
+    detector.onEnd!(ScaleEndDetails());
+    detector.dispose();
+    await unmount(tester);
+  });
+
+  testWidgets(
+      'a twist without timestamps still rotates past the strictest gate',
+      (tester) async {
+    await pumpMap(tester);
+    final detector = scaleRecognizer(tester);
+    detector.onStart!(
+        ScaleStartDetails(focalPoint: const Offset(160, 320), pointerCount: 2));
+    calls.clear();
+    int? firstRotation;
+    for (var degrees = 1; degrees <= 20; degrees++) {
+      detector.onUpdate!(ScaleUpdateDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          rotation: degrees * math.pi / 180));
+      if (firstRotation == null && callNamed(calls, 'rotateBy') != null) {
+        firstRotation = degrees;
+      }
+    }
+    expect(firstRotation, inInclusiveRange(15, 16));
+    detector.onEnd!(ScaleEndDetails());
+    detector.dispose();
+    await unmount(tester);
+  });
+
+  Future<void> pumpMapUnderEdgeStrip(
+    WidgetTester tester, {
+    required List<String> events,
+    TextDirection direction = TextDirection.ltr,
+  }) async {
+    // The shape of the app's side drawer: a translucent edge strip stacked
+    // over the page, so a touch in it reaches both the strip and the map.
+    await tester.pumpWidget(MaterialApp(
+      home: Directionality(
+        textDirection: direction,
+        child: Stack(children: [
+          const Positioned.fill(child: MapTexture()),
+          PositionedDirectional(
+            start: 0,
+            top: 0,
+            bottom: 0,
+            width: 24,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragStart: (_) => events.add('edgeDragStart'),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    calls.clear();
+  }
+
+  Future<void> swipe(WidgetTester tester, Offset from, Offset by) async {
+    final finger = await tester.startGesture(from);
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveTo(from + by * (i / 6),
+          timeStamp: Duration(milliseconds: 16 * i));
+    }
+    await finger.up(timeStamp: const Duration(milliseconds: 112));
+    await tester.pump();
+  }
+
+  testWidgets('an edge swipe strip over the map keeps its drag',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester, events: events);
+    await swipe(tester, const Offset(8, 300), const Offset(80, 0));
+    expect(events, contains('edgeDragStart'));
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('the trailing edge strip keeps its drag under RTL',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester,
+        events: events, direction: TextDirection.rtl);
+    final width = tester.getSize(find.byType(Texture)).width;
+    await swipe(tester, Offset(width - 8, 300), const Offset(-80, 0));
+    expect(events, contains('edgeDragStart'));
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('away from the edge the map still pans at the native boundary',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester, events: events);
+    final finger = await tester.startGesture(const Offset(120, 300));
+    await finger.moveTo(const Offset(130, 300),
+        timeStamp: const Duration(milliseconds: 16));
+    await tester.pump();
+    expect(callNamed(calls, 'panBegin'), isNotNull);
+    await finger.up(timeStamp: const Duration(milliseconds: 32));
+    await tester.pump();
+    expect(events, isEmpty);
     await unmount(tester);
   });
 }

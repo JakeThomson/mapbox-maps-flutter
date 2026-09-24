@@ -7,7 +7,7 @@ tests.add_file_references([project.main_group.new_file('ProbeTests.swift')])
 tests.add_dependency(app)
 [app, tests].each do |target|
  target.build_configurations.each do |config|
-  config.build_settings.merge!({'GENERATE_INFOPLIST_FILE'=>'YES', 'SWIFT_VERSION'=>'5.0', 'CODE_SIGNING_ALLOWED'=>'NO', 'TARGETED_DEVICE_FAMILY'=>'1,2', 'PRODUCT_BUNDLE_IDENTIFIER'=>"dev.codex.#{target.name}", 'INFOPLIST_KEY_UILaunchScreen_Generation'=>'YES'})
+  config.build_settings.merge!({'GENERATE_INFOPLIST_FILE'=>'YES', 'SWIFT_VERSION'=>'5.0', 'CODE_SIGNING_ALLOWED'=>'NO', 'TARGETED_DEVICE_FAMILY'=>'1,2', 'PRODUCT_BUNDLE_IDENTIFIER'=>"com.mapbox.gestureprobe.#{target.name}", 'INFOPLIST_KEY_UILaunchScreen_Generation'=>'YES'})
  end
 end
 tests.build_configurations.each { |c| c.build_settings['TEST_TARGET_NAME']='GestureProbe' }
