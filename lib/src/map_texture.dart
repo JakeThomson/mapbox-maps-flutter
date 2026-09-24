@@ -85,6 +85,8 @@ class _MapTextureState extends State<MapTexture> {
   Offset? _panOrigin;
   bool _hadMultiplePointers = false;
   bool _cancelled = false;
+  Duration? _lastPanMoveTimestamp;
+  Duration? _releaseTimestamp;
   double _lastScale = 1;
   Offset? _lastFocal;
   Offset? _lastTap;
@@ -284,6 +286,8 @@ class _MapTextureState extends State<MapTexture> {
     if (_pointers.isEmpty) {
       _hadMultiplePointers = false;
       _cancelled = false;
+      _lastPanMoveTimestamp = null;
+      _releaseTimestamp = null;
     }
     _pointers[event.pointer] = event.localPosition;
     _hadMultiplePointers |= _pointers.length > 1;
@@ -301,7 +305,15 @@ class _MapTextureState extends State<MapTexture> {
       ? null
       : _pointers.values.reduce((a, b) => a + b) / _pointers.length.toDouble();
 
+  void _pointerMove(PointerMoveEvent event) {
+    if (event.delta != Offset.zero) {
+      _lastPanMoveTimestamp = event.timeStamp;
+    }
+    _pointers[event.pointer] = event.localPosition;
+  }
+
   void _pointerUp(PointerEvent event) {
+    _releaseTimestamp = event.timeStamp;
     _cancelled |= event is PointerCancelEvent;
     _pointers.remove(event.pointer);
     // A change in the finger count starts a new scale segment. Rebase its
@@ -372,7 +384,7 @@ class _MapTextureState extends State<MapTexture> {
         // Buttons painted above the map still own their own hit tests.
         return Listener(
           onPointerDown: _pointerDown,
-          onPointerMove: (e) => _pointers[e.pointer] = e.localPosition,
+          onPointerMove: _pointerMove,
           onPointerUp: _pointerUp,
           onPointerCancel: _pointerUp,
           child: GestureDetector(
@@ -478,6 +490,16 @@ class _MapTextureState extends State<MapTexture> {
                   d.pointerCount != 0 ||
                   _hadMultiplePointers ||
                   _cancelled) {
+                return;
+              }
+              // Match the native pan handler: a pause before release is not
+              // a flick, even if Flutter retains velocity from the last move.
+              final lastMove = _lastPanMoveTimestamp;
+              final release = _releaseTimestamp;
+              if (lastMove == null ||
+                  release == null ||
+                  release < lastMove ||
+                  (release - lastMove).inMicroseconds >= 1000000 / 30) {
                 return;
               }
               final v = d.velocity.pixelsPerSecond;

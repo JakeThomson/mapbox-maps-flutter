@@ -1,6 +1,6 @@
 ### Unreleased
 
-* [iOS] Fix `MapTexture` losing initial swipe movement, continuing to drift on touch-down, flinging after multi-touch or cancellation, rotating on incidental twists, and dropping small pinch updates.
+* [iOS] Fix `MapTexture` losing initial swipe movement, continuing to drift on touch-down, flinging after multi-touch, cancellation or a paused release, rotating on incidental twists, and dropping small pinch updates. Align the fling anchor with the native pan handler.
 
 ### 2.31.0
 

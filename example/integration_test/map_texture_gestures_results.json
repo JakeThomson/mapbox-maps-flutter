@@ -1,0 +1,56 @@
+{
+  "baseline": {
+    "variant": "baseline",
+    "activation_distance_center_delta": {
+      "1": 0.0,
+      "4": 0.0,
+      "8": 0.0,
+      "12": 0.0,
+      "18": 0.0,
+      "19": 0.0,
+      "24": 0.0,
+      "36": 0.0,
+      "37": 0.0,
+      "50": 0.0
+    },
+    "paused_release_drift": 0.0,
+    "single_move_swipe_center_delta": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "touch_down_drift": 0.028732899999994316,
+    "pinch_release_drift": 0.02574350000000436,
+    "incidental_rotation_degrees": 2.0,
+    "intentional_rotation_degrees": 10.0,
+    "small_pinch_zoom_delta": 0.0,
+    "filter_taps": 1
+  },
+  "fixed": {
+    "variant": "fixed",
+    "activation_distance_center_delta": {
+      "1": 0.0,
+      "4": 0.0,
+      "8": 0.0,
+      "12": 0.0,
+      "18": 0.0,
+      "19": 0.003261600000001863,
+      "24": 0.004119899999977861,
+      "36": 0.006179800000012392,
+      "37": 0.006351499999993848,
+      "50": 0.00858299999998735
+    },
+    "paused_release_drift": 0.0,
+    "single_move_swipe_center_delta": [
+      0.00858299999998735,
+      0.00858299999998735,
+      0.00858299999998735
+    ],
+    "touch_down_drift": 0.0,
+    "pinch_release_drift": 0.0,
+    "incidental_rotation_degrees": 0.0,
+    "intentional_rotation_degrees": 8.0,
+    "small_pinch_zoom_delta": 0.004999999999999005,
+    "filter_taps": 1
+  }
+}

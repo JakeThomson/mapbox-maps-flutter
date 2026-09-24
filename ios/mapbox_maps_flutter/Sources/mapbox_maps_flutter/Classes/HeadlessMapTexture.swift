@@ -161,7 +161,11 @@ final class HeadlessMapTexture: NSObject {
         instance.stopFling()
         guard abs(velocity.x) > minimumFlingSpeed || abs(velocity.y) > minimumFlingSpeed else { return }
         instance.flingVelocity = velocity
-        instance.flingOrigin = point
+        // Match PanGestureHandler: keep deceleration away from the horizon,
+        // where a small screen displacement can translate into a huge pan.
+        instance.flingOrigin = CGPoint(
+            x: point.x,
+            y: max(point.y, 3 * instance.host.bounds.height / 4))
         instance.flingPrevious = CACurrentMediaTime()
         let link = CADisplayLink(target: instance, selector: #selector(stepFling))
         link.add(to: .main, forMode: .common)

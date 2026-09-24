@@ -349,4 +349,78 @@ void main() {
     expect(callNamed(calls, 'tap'), isNull);
     await unmount(tester);
   });
+  testWidgets('a paused drag release does not start a stale fling',
+      (tester) async {
+    await pumpMap(tester);
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveBy(const Offset(10, 0),
+          timeStamp: Duration(milliseconds: i * 10));
+    }
+    calls.clear();
+    await finger.up(timeStamp: const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('measure pan recognition distance without losing movement',
+      (tester) async {
+    await pumpMap(tester);
+    final origin = tester.getCenter(find.byType(Texture));
+    final recognised = <int>[];
+    for (final distance in [1, 4, 8, 12, 18, 19, 24, 36, 37, 50]) {
+      calls.clear();
+      final finger = await tester.startGesture(origin);
+      await finger.moveBy(Offset(distance.toDouble(), 0),
+          timeStamp: const Duration(milliseconds: 16));
+      await tester.pump();
+      final update = callNamed(calls, 'panUpdate');
+      if (update != null) {
+        recognised.add(distance);
+        expect(update.arguments['x'], 160.0 + distance);
+      }
+      await finger.cancel(timeStamp: const Duration(milliseconds: 20));
+    }
+    // A tap must remain possible; recognition must not discard a short swipe.
+    expect(recognised, isNot(contains(1)));
+    expect(recognised, contains(50));
+    // ignore: avoid_print
+    print('PAN_RECOGNITION_DISTANCES $recognised');
+    await unmount(tester);
+  });
+  for (final entry
+      in <int, int?>{100: null, 20: 3, 10: 5, 5: 7, 1: 15}.entries) {
+    testWidgets('rotation gate at ${entry.key} ms per degree', (tester) async {
+      await pumpMap(tester);
+      final detector = tester.widget<GestureDetector>(find.descendant(
+          of: find.byType(MapTexture), matching: find.byType(GestureDetector)));
+      detector.onScaleStart!(ScaleStartDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          sourceTimeStamp: Duration.zero));
+      calls.clear();
+      int? firstRotation;
+      for (var degrees = 1; degrees <= 20; degrees++) {
+        detector.onScaleUpdate!(ScaleUpdateDetails(
+            focalPoint: const Offset(160, 320),
+            pointerCount: 2,
+            rotation: degrees * math.pi / 180,
+            sourceTimeStamp: Duration(milliseconds: entry.key * degrees)));
+        if (firstRotation == null && callNamed(calls, 'rotateBy') != null) {
+          firstRotation = degrees;
+        }
+      }
+      if (entry.value == null) {
+        expect(firstRotation, isNull);
+      } else {
+        // Degree/radian conversion may put an exact boundary one ulp below
+        // its threshold; activation must occur within the next sample.
+        expect(firstRotation, inInclusiveRange(entry.value!, entry.value! + 1));
+      }
+      detector.onScaleEnd!(ScaleEndDetails());
+      await unmount(tester);
+    });
+  }
 }
