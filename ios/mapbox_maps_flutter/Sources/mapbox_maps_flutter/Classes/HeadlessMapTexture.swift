@@ -168,6 +168,12 @@ final class HeadlessMapTexture: NSObject {
         instance.flingLink = link
     }
 
+    static func touchDown(textureId: Int64) {
+        guard let instance = instances[textureId] else { return }
+        instance.stopFling()
+        instance.controller.mapboxMapView.camera.cancelAnimations()
+    }
+
     static func stopFling(textureId: Int64) {
         instances[textureId]?.stopFling()
     }

@@ -12,8 +12,8 @@ part of '../mapbox_maps_flutter.dart';
 /// [Texture] and composites like any other widget.
 ///
 /// The trade is that flutter owns the hit test, so gestures are forwarded
-/// rather than handled by the map's own recognisers. Pan and pinch are wired;
-/// rotate and pitch are not yet.
+/// rather than handled by the map's own recognisers. Pan, pinch, rotation and
+/// quick zoom are forwarded to the native host.
 class MapTexture extends StatefulWidget {
   const MapTexture({
     super.key,
@@ -78,6 +78,13 @@ class _MapTextureState extends State<MapTexture> {
   ui.Size? _size;
   bool _creating = false;
   double _lastRotation = 0;
+  double _discardedRotation = 0;
+  bool _rotating = false;
+  Duration? _rotationTimestamp;
+  final Map<int, Offset> _pointers = {};
+  Offset? _panOrigin;
+  bool _hadMultiplePointers = false;
+  bool _cancelled = false;
   double _lastScale = 1;
   Offset? _lastFocal;
   Offset? _lastTap;
@@ -273,6 +280,74 @@ class _MapTextureState extends State<MapTexture> {
     ));
   }
 
+  void _pointerDown(PointerDownEvent event) {
+    if (_pointers.isEmpty) {
+      _hadMultiplePointers = false;
+      _cancelled = false;
+    }
+    _pointers[event.pointer] = event.localPosition;
+    _hadMultiplePointers |= _pointers.length > 1;
+    _panOrigin = _pointerCenter;
+    _secondTouchDown =
+        _pointers.length == 1 && _isSecondTap(event.localPosition)
+            ? event.localPosition
+            : null;
+    // Interrupt both our deceleration and SDK camera animations immediately;
+    // waiting for onScaleStart lets the map run away beneath a resting finger.
+    _send('touchDown');
+  }
+
+  Offset? get _pointerCenter => _pointers.isEmpty
+      ? null
+      : _pointers.values.reduce((a, b) => a + b) / _pointers.length.toDouble();
+
+  void _pointerUp(PointerEvent event) {
+    _cancelled |= event is PointerCancelEvent;
+    _pointers.remove(event.pointer);
+    // A change in the finger count starts a new scale segment. Rebase its
+    // pan origin so lifting or adding a finger cannot jump the camera.
+    _panOrigin = _pointerCenter;
+  }
+
+  void _rotate(ScaleUpdateDetails details) {
+    final timestamp = details.sourceTimeStamp;
+    final previous = _rotationTimestamp;
+    // atan2 can cross its +/- pi boundary while the fingers barely move.
+    final rawDelta = details.rotation - _lastRotation;
+    final delta = math.atan2(math.sin(rawDelta), math.cos(rawDelta));
+    _lastRotation = details.rotation;
+    _rotationTimestamp = timestamp;
+    if (details.pointerCount < 2) return;
+    if (!_rotating) {
+      _discardedRotation += delta.abs();
+      if (timestamp == null || previous == null || timestamp <= previous) {
+        return;
+      }
+      final angle = _discardedRotation * 180 / math.pi;
+      final speed = delta.abs() *
+          180 /
+          math.pi /
+          ((timestamp - previous).inMicroseconds / 1000);
+      // Mapbox iOS RotateGestureHandler's angle/velocity gate. Discard the
+      // pre-recognition angle rather than snapping it into the first update.
+      if (angle < 3 ||
+          speed < 0.04 ||
+          (speed > 0.07 && angle < 5) ||
+          (speed > 0.15 && angle < 7) ||
+          (speed > 0.5 && angle < 15)) {
+        return;
+      }
+      _rotating = true;
+    }
+    if (delta != 0) {
+      _send('rotateBy', {
+        'radians': delta,
+        'x': details.localFocalPoint.dx,
+        'y': details.localFocalPoint.dy,
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -292,17 +367,22 @@ class _MapTextureState extends State<MapTexture> {
         // over it here.
         final texture = Texture(textureId: _textureId!);
         if (!widget.gesturesEnabled) return texture;
-        // The Listener only watches: it records whether a touch came down as
-        // the second of a double tap, which the scale recogniser cannot tell
-        // by the time it wins, after the finger has already moved.
+        // Observe touch-down without claiming the gesture arena: stop motion
+        // immediately and retain the origin until the scale recogniser wins.
+        // Buttons painted above the map still own their own hit tests.
         return Listener(
-          onPointerDown: (e) => _secondTouchDown =
-              _isSecondTap(e.localPosition) ? e.localPosition : null,
+          onPointerDown: _pointerDown,
+          onPointerMove: (e) => _pointers[e.pointer] = e.localPosition,
+          onPointerUp: _pointerUp,
+          onPointerCancel: _pointerUp,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapUp: (d) => _tap(d.localPosition),
             onScaleStart: (d) {
               _lastRotation = 0;
+              _discardedRotation = 0;
+              _rotating = false;
+              _rotationTimestamp = d.sourceTimeStamp;
               _lastScale = 1;
               _lastFocal = d.localFocalPoint;
               _longPress?.cancel();
@@ -320,7 +400,12 @@ class _MapTextureState extends State<MapTexture> {
               final origin = d.localFocalPoint;
               _longPress =
                   Timer(_longPressDelay, () => _tap(origin, long: true));
-              _send('panBegin', {
+              final panOrigin = _panOrigin ?? d.localFocalPoint;
+              _send('panBegin', {'x': panOrigin.dx, 'y': panOrigin.dy});
+              // onScaleStart reports the recognition point, not touch-down.
+              // Keep the displacement that crossed slop, including a quick
+              // swipe with only one move event before release.
+              _send('panUpdate', {
                 'x': d.localFocalPoint.dx,
                 'y': d.localFocalPoint.dy,
               });
@@ -369,16 +454,12 @@ class _MapTextureState extends State<MapTexture> {
               // log2 of scale, so the step is the ratio since the last update:
               // spreading the fingers to twice the distance is exactly one
               // zoom level, however many updates it took.
-              if ((d.scale / _lastScale - 1).abs() > 0.01) {
+              if (d.scale > 0 && d.scale != _lastScale) {
                 final delta = math.log(d.scale / _lastScale) / math.ln2;
                 _send('zoomBy', {'delta': delta, 'x': x, 'y': y});
                 _lastScale = d.scale;
               }
-              if (d.rotation.abs() > 0.01) {
-                _send('rotateBy',
-                    {'radians': d.rotation - _lastRotation, 'x': x, 'y': y});
-                _lastRotation = d.rotation;
-              }
+              _rotate(d);
             },
             onScaleEnd: (d) {
               _longPress?.cancel();
@@ -393,7 +474,12 @@ class _MapTextureState extends State<MapTexture> {
               // A flick should keep going. The host decays it with the sdk's
               // own physics; below its floor this is a no-op.
               final focal = _lastFocal;
-              if (focal == null || d.pointerCount > 1) return;
+              if (focal == null ||
+                  d.pointerCount != 0 ||
+                  _hadMultiplePointers ||
+                  _cancelled) {
+                return;
+              }
               final v = d.velocity.pixelsPerSecond;
               _send('fling', {
                 'vx': v.dx,

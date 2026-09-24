@@ -1,3 +1,7 @@
+### Unreleased
+
+* [iOS] Fix `MapTexture` losing initial swipe movement, continuing to drift on touch-down, flinging after multi-touch or cancellation, rotating on incidental twists, and dropping small pinch updates.
+
 ### 2.31.0
 
 * Introduce experimental `RasterLayer.rasterColorScale` property, resulting in more precise visualization with long-tailed raster-array data source.

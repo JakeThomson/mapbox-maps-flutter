@@ -67,6 +67,10 @@ public class MapboxMapsPlugin: NSObject, FlutterPlugin {
                                  height: args["height"] as? Double ?? 0)
                 )
                 result(nil)
+            case "touchDown":
+                let id = Int64((args["textureId"] as? Int) ?? -1)
+                HeadlessMapTexture.touchDown(textureId: id)
+                result(nil)
             case "tap", "longPress", "fling", "zoomStep":
                 let id = Int64((args["textureId"] as? Int) ?? -1)
                 let point = CGPoint(x: args["x"] as? Double ?? 0,
