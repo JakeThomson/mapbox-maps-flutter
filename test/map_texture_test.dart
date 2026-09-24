@@ -1,7 +1,9 @@
 import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
@@ -35,7 +37,8 @@ void main() {
         .setMockMethodCallHandler(channel, null);
   });
 
-  Future<void> pumpMap(WidgetTester tester, {ui.Size size = const ui.Size(320, 640)}) async {
+  Future<void> pumpMap(WidgetTester tester,
+      {ui.Size size = const ui.Size(320, 640)}) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Center(
@@ -63,6 +66,25 @@ void main() {
     return null;
   }
 
+  /// A standalone copy of the map's scale recogniser, wired to the same
+  /// handlers, so a test can feed it exact rotations and timestamps.
+  ScaleGestureRecognizer scaleRecognizer(WidgetTester tester) {
+    final raw = tester.widget<RawGestureDetector>(find.descendant(
+        of: find.byType(MapTexture),
+        matching: find.byType(RawGestureDetector)));
+    ScaleGestureRecognizer? scale;
+    for (final factory in raw.gestures.values) {
+      final recognizer = factory.constructor();
+      if (recognizer is ScaleGestureRecognizer) {
+        factory.initializer(recognizer);
+        scale = recognizer;
+      } else {
+        recognizer.dispose();
+      }
+    }
+    return scale!;
+  }
+
   testWidgets('creates the map at the size of its constraints', (tester) async {
     await pumpMap(tester, size: const ui.Size(300, 500));
     final create = callNamed(calls, 'create');
@@ -86,7 +108,8 @@ void main() {
     calls.clear();
     await tester.pumpWidget(const SizedBox.shrink());
     await pumpMap(tester);
-    final second = callNamed(calls, 'create')!.arguments['channelSuffix'] as int;
+    final second =
+        callNamed(calls, 'create')!.arguments['channelSuffix'] as int;
     expect(second, isNot(first));
     await unmount(tester);
   });
@@ -124,8 +147,7 @@ void main() {
     expect(dispose!.arguments['textureId'], 7);
   });
 
-  testWidgets('a drag forwards panBegin, panUpdate and panEnd',
-      (tester) async {
+  testWidgets('a drag forwards panBegin, panUpdate and panEnd', (tester) async {
     await pumpMap(tester);
     calls.clear();
     await tester.drag(find.byType(Texture), const Offset(-40, -20));
@@ -152,6 +174,466 @@ void main() {
     await tester.drag(find.byType(Texture), const Offset(-40, -20));
     await tester.pumpAndSettle();
     expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('touch down interrupts motion before a drag is recognised',
+      (tester) async {
+    await pumpMap(tester);
+    calls.clear();
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    await tester.pump();
+    expect(callNamed(calls, 'touchDown'), isNotNull);
+    expect(callNamed(calls, 'panUpdate'), isNull);
+    await finger.up();
+    await unmount(tester);
+  });
+
+  testWidgets('a recognised swipe retains its initial displacement',
+      (tester) async {
+    await pumpMap(tester);
+    calls.clear();
+    final origin = tester.getCenter(find.byType(Texture));
+    final finger = await tester.startGesture(origin);
+    await finger.moveBy(const Offset(50, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await finger.moveBy(const Offset(10, 0),
+        timeStamp: const Duration(milliseconds: 32));
+    await tester.pump();
+    final begin = callNamed(calls, 'panBegin')!;
+    expect(begin.arguments['x'], 160.0);
+    final updates = calls.where((c) => c.method == 'panUpdate').toList();
+    expect(updates.last.arguments['x'], 220.0);
+    await finger.up();
+    await unmount(tester);
+  });
+
+  testWidgets('lifting one finger from a pinch never starts a fling',
+      (tester) async {
+    await pumpMap(tester);
+    final center = tester.getCenter(find.byType(Texture));
+    final first =
+        await tester.startGesture(center - const Offset(50, 0), pointer: 1);
+    final second =
+        await tester.startGesture(center + const Offset(50, 0), pointer: 2);
+    for (var i = 1; i <= 6; i++) {
+      await second.moveBy(const Offset(10, 0),
+          timeStamp: Duration(milliseconds: i * 10));
+    }
+    calls.clear();
+    await second.up(timeStamp: const Duration(milliseconds: 65));
+    await tester.pump();
+    expect(callNamed(calls, 'fling'), isNull);
+    await first.up();
+    await unmount(tester);
+  });
+
+  testWidgets('pinch jitter under three degrees does not rotate the map',
+      (tester) async {
+    await pumpMap(tester);
+    final center = tester.getCenter(find.byType(Texture));
+    final first =
+        await tester.startGesture(center - const Offset(50, 0), pointer: 1);
+    final second =
+        await tester.startGesture(center + const Offset(50, 0), pointer: 2);
+    await second.moveTo(center + const Offset(90, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await second.moveTo(center + const Offset(95, 0),
+        timeStamp: const Duration(milliseconds: 32));
+    calls.clear();
+    await second.moveTo(center + Offset(95, 145 * math.tan(2 * math.pi / 180)),
+        timeStamp: const Duration(milliseconds: 48));
+    await tester.pump();
+    expect(callNamed(calls, 'rotateBy'), isNull);
+    await second.up();
+    await first.up();
+    await unmount(tester);
+  });
+
+  testWidgets('small pinch updates are forwarded without one percent steps',
+      (tester) async {
+    await pumpMap(tester);
+    final center = tester.getCenter(find.byType(Texture));
+    final first =
+        await tester.startGesture(center - const Offset(50, 0), pointer: 1);
+    final second =
+        await tester.startGesture(center + const Offset(50, 0), pointer: 2);
+    await second.moveTo(center + const Offset(90, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await second.moveTo(center + const Offset(95, 0),
+        timeStamp: const Duration(milliseconds: 32));
+    calls.clear();
+    await second.moveBy(const Offset(0.5, 0),
+        timeStamp: const Duration(milliseconds: 48));
+    await tester.pump();
+    expect(callNamed(calls, 'zoomBy'), isNotNull, reason: calls.toString());
+    await second.up();
+    await first.up();
+    await unmount(tester);
+  });
+  testWidgets('repeated quick swipes each move from their own touch origin',
+      (tester) async {
+    await pumpMap(tester);
+    final origin = tester.getCenter(find.byType(Texture));
+    for (var i = 0; i < 3; i++) {
+      calls.clear();
+      final finger = await tester.startGesture(origin, pointer: i + 1);
+      await finger.moveBy(const Offset(50, 0),
+          timeStamp: const Duration(milliseconds: 16));
+      await finger.up(timeStamp: const Duration(milliseconds: 20));
+      await tester.pump();
+      expect(callNamed(calls, 'touchDown'), isNotNull);
+      expect(callNamed(calls, 'panBegin')!.arguments['x'], 160.0);
+      expect(callNamed(calls, 'panUpdate')!.arguments['x'], 210.0);
+    }
+    await unmount(tester);
+  });
+
+  testWidgets('an intentional twist rotates without applying discarded jitter',
+      (tester) async {
+    await pumpMap(tester);
+    final center = tester.getCenter(find.byType(Texture));
+    final first =
+        await tester.startGesture(center - const Offset(50, 0), pointer: 1);
+    final second =
+        await tester.startGesture(center + const Offset(50, 0), pointer: 2);
+    await second.moveTo(center + const Offset(90, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await second.moveTo(center + const Offset(95, 0),
+        timeStamp: const Duration(milliseconds: 32));
+    calls.clear();
+    for (var degrees = 1; degrees <= 10; degrees++) {
+      await second.moveTo(
+          center + Offset(95, 145 * math.tan(degrees * math.pi / 180)),
+          timeStamp: Duration(milliseconds: 32 + degrees * 16));
+    }
+    await tester.pump();
+    final rotations = calls.where((c) => c.method == 'rotateBy').toList();
+    expect(rotations, isNotEmpty);
+    for (final call in rotations) {
+      expect((call.arguments['radians'] as double).abs(),
+          lessThan(2 * math.pi / 180));
+    }
+    await second.up();
+    await first.up();
+    await unmount(tester);
+  });
+
+  testWidgets('a single-finger flick still forwards release velocity',
+      (tester) async {
+    await pumpMap(tester);
+    calls.clear();
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveBy(const Offset(10, 0),
+          timeStamp: Duration(milliseconds: i * 10));
+    }
+    await finger.up(timeStamp: const Duration(milliseconds: 65));
+    await tester.pump();
+    expect(callNamed(calls, 'fling')!.arguments['vx'], greaterThan(500));
+    await unmount(tester);
+  });
+
+  testWidgets('a cancelled drag does not fling', (tester) async {
+    await pumpMap(tester);
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveBy(const Offset(10, 0),
+          timeStamp: Duration(milliseconds: i * 10));
+    }
+    calls.clear();
+    await finger.cancel(timeStamp: const Duration(milliseconds: 65));
+    await tester.pump();
+    expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('controls above the map still receive taps', (tester) async {
+    var tapped = false;
+    await tester.pumpWidget(MaterialApp(
+        home: Stack(children: [
+      const Positioned.fill(child: MapTexture()),
+      Center(
+          child: TextButton(
+              onPressed: () => tapped = true, child: const Text('Filter'))),
+    ])));
+    await tester.pump();
+    await tester.pump();
+    calls.clear();
+    await tester.tap(find.text('Filter'));
+    await tester.pump();
+    expect(tapped, isTrue);
+    expect(callNamed(calls, 'touchDown'), isNull);
+    expect(callNamed(calls, 'tap'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('a paused drag release does not start a stale fling',
+      (tester) async {
+    await pumpMap(tester);
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveBy(const Offset(10, 0),
+          timeStamp: Duration(milliseconds: i * 10));
+    }
+    calls.clear();
+    await finger.up(timeStamp: const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('measure pan recognition distance without losing movement',
+      (tester) async {
+    await pumpMap(tester);
+    final origin = tester.getCenter(find.byType(Texture));
+    final recognised = <int>[];
+    for (final distance in [1, 4, 8, 9, 10, 12, 18, 19, 24, 36, 37, 50]) {
+      calls.clear();
+      final finger = await tester.startGesture(origin);
+      await finger.moveBy(Offset(distance.toDouble(), 0),
+          timeStamp: const Duration(milliseconds: 16));
+      await tester.pump();
+      final update = callNamed(calls, 'panUpdate');
+      if (update != null) {
+        recognised.add(distance);
+        expect(update.arguments['x'], 160.0 + distance);
+      }
+      await finger.cancel(timeStamp: const Duration(milliseconds: 20));
+    }
+    // A tap must remain possible; recognition must not discard a short swipe.
+    expect(recognised, isNot(contains(9)));
+    expect(recognised, contains(10));
+    expect(recognised, contains(50));
+    // ignore: avoid_print
+    print('PAN_RECOGNITION_DISTANCES $recognised');
+    await unmount(tester);
+  });
+  for (final entry
+      in <int, int?>{100: null, 20: 3, 10: 5, 5: 7, 1: 15}.entries) {
+    testWidgets('rotation gate at ${entry.key} ms per degree', (tester) async {
+      await pumpMap(tester);
+      final detector = scaleRecognizer(tester);
+      detector.onStart!(ScaleStartDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          sourceTimeStamp: Duration.zero));
+      calls.clear();
+      int? firstRotation;
+      for (var degrees = 1; degrees <= 20; degrees++) {
+        detector.onUpdate!(ScaleUpdateDetails(
+            focalPoint: const Offset(160, 320),
+            pointerCount: 2,
+            rotation: degrees * math.pi / 180,
+            sourceTimeStamp: Duration(milliseconds: entry.key * degrees)));
+        if (firstRotation == null && callNamed(calls, 'rotateBy') != null) {
+          firstRotation = degrees;
+        }
+      }
+      if (entry.value == null) {
+        expect(firstRotation, isNull);
+      } else {
+        // Degree/radian conversion may put an exact boundary one ulp below
+        // its threshold; activation must occur within the next sample.
+        expect(firstRotation, inInclusiveRange(entry.value!, entry.value! + 1));
+      }
+      detector.onEnd!(ScaleEndDetails());
+      detector.dispose();
+      await unmount(tester);
+    });
+  }
+  testWidgets('sub-threshold touch movement remains a map tap', (tester) async {
+    await pumpMap(tester);
+    calls.clear();
+    final finger =
+        await tester.startGesture(tester.getCenter(find.byType(Texture)));
+    await finger.moveBy(const Offset(8, 0),
+        timeStamp: const Duration(milliseconds: 16));
+    await finger.up(timeStamp: const Duration(milliseconds: 32));
+    await tester.pump();
+    expect(callNamed(calls, 'tap'), isNotNull);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('an ancestor that wins the gesture prevents map panning',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+        home: RawGestureDetector(
+      gestures: {
+        EagerGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<EagerGestureRecognizer>(
+                () => EagerGestureRecognizer(), (_) {}),
+      },
+      child: const MapTexture(),
+    )));
+    await tester.pump();
+    await tester.pump();
+    calls.clear();
+    await tester.drag(find.byType(Texture), const Offset(30, 0));
+    await tester.pump();
+    expect(callNamed(calls, 'panBegin'), isNull);
+    expect(callNamed(calls, 'panUpdate'), isNull);
+    await unmount(tester);
+  });
+  testWidgets('double tap still zooms after using the native pan boundary',
+      (tester) async {
+    await pumpMap(tester);
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    calls.clear();
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    expect(callNamed(calls, 'zoomStep')!.arguments['delta'], 1.0);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('double tap and drag remains quick zoom, not a pan or fling',
+      (tester) async {
+    await pumpMap(tester);
+    await tester.tap(find.byType(Texture));
+    await tester.pump();
+    calls.clear();
+    final origin = tester.getCenter(find.byType(Texture));
+    final finger = await tester.startGesture(origin);
+    await finger.moveBy(const Offset(0, 10),
+        timeStamp: const Duration(milliseconds: 16));
+    await finger.moveBy(const Offset(0, 20),
+        timeStamp: const Duration(milliseconds: 32));
+    await finger.up(timeStamp: const Duration(milliseconds: 40));
+    await tester.pump();
+    expect(callNamed(calls, 'zoomBy'), isNotNull);
+    expect(callNamed(calls, 'panBegin'), isNull);
+    expect(callNamed(calls, 'fling'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('rotation jitter that nets under three degrees never rotates',
+      (tester) async {
+    await pumpMap(tester);
+    final detector = scaleRecognizer(tester);
+    detector.onStart!(ScaleStartDetails(
+        focalPoint: const Offset(160, 320),
+        pointerCount: 2,
+        sourceTimeStamp: Duration.zero));
+    calls.clear();
+    // One degree each way, 16 ms apart: every step sits in the slowest speed
+    // band, so only the 3 degree floor applies. Summing the magnitudes would
+    // pass it on the fourth step; the fingers never twist more than a degree.
+    for (var i = 1; i <= 12; i++) {
+      final degrees = i.isOdd ? 1 : 0;
+      detector.onUpdate!(ScaleUpdateDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          rotation: degrees * math.pi / 180,
+          sourceTimeStamp: Duration(milliseconds: 16 * i)));
+    }
+    expect(callNamed(calls, 'rotateBy'), isNull);
+    detector.onEnd!(ScaleEndDetails());
+    detector.dispose();
+    await unmount(tester);
+  });
+
+  testWidgets(
+      'a twist without timestamps still rotates past the strictest gate',
+      (tester) async {
+    await pumpMap(tester);
+    final detector = scaleRecognizer(tester);
+    detector.onStart!(
+        ScaleStartDetails(focalPoint: const Offset(160, 320), pointerCount: 2));
+    calls.clear();
+    int? firstRotation;
+    for (var degrees = 1; degrees <= 20; degrees++) {
+      detector.onUpdate!(ScaleUpdateDetails(
+          focalPoint: const Offset(160, 320),
+          pointerCount: 2,
+          rotation: degrees * math.pi / 180));
+      if (firstRotation == null && callNamed(calls, 'rotateBy') != null) {
+        firstRotation = degrees;
+      }
+    }
+    expect(firstRotation, inInclusiveRange(15, 16));
+    detector.onEnd!(ScaleEndDetails());
+    detector.dispose();
+    await unmount(tester);
+  });
+
+  Future<void> pumpMapUnderEdgeStrip(
+    WidgetTester tester, {
+    required List<String> events,
+    TextDirection direction = TextDirection.ltr,
+  }) async {
+    // The shape of the app's side drawer: a translucent edge strip stacked
+    // over the page, so a touch in it reaches both the strip and the map.
+    await tester.pumpWidget(MaterialApp(
+      home: Directionality(
+        textDirection: direction,
+        child: Stack(children: [
+          const Positioned.fill(child: MapTexture()),
+          PositionedDirectional(
+            start: 0,
+            top: 0,
+            bottom: 0,
+            width: 24,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragStart: (_) => events.add('edgeDragStart'),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    calls.clear();
+  }
+
+  Future<void> swipe(WidgetTester tester, Offset from, Offset by) async {
+    final finger = await tester.startGesture(from);
+    for (var i = 1; i <= 6; i++) {
+      await finger.moveTo(from + by * (i / 6),
+          timeStamp: Duration(milliseconds: 16 * i));
+    }
+    await finger.up(timeStamp: const Duration(milliseconds: 112));
+    await tester.pump();
+  }
+
+  testWidgets('an edge swipe strip over the map keeps its drag',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester, events: events);
+    await swipe(tester, const Offset(8, 300), const Offset(80, 0));
+    expect(events, contains('edgeDragStart'));
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('the trailing edge strip keeps its drag under RTL',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester,
+        events: events, direction: TextDirection.rtl);
+    final width = tester.getSize(find.byType(Texture)).width;
+    await swipe(tester, Offset(width - 8, 300), const Offset(-80, 0));
+    expect(events, contains('edgeDragStart'));
+    expect(callNamed(calls, 'panBegin'), isNull);
+    await unmount(tester);
+  });
+
+  testWidgets('away from the edge the map still pans at the native boundary',
+      (tester) async {
+    final events = <String>[];
+    await pumpMapUnderEdgeStrip(tester, events: events);
+    final finger = await tester.startGesture(const Offset(120, 300));
+    await finger.moveTo(const Offset(130, 300),
+        timeStamp: const Duration(milliseconds: 16));
+    await tester.pump();
+    expect(callNamed(calls, 'panBegin'), isNotNull);
+    await finger.up(timeStamp: const Duration(milliseconds: 32));
+    await tester.pump();
+    expect(events, isEmpty);
     await unmount(tester);
   });
 }

@@ -1,3 +1,7 @@
+### Unreleased
+
+* [iOS] Fix `MapTexture` losing initial swipe movement, continuing to drift on touch-down, flinging after multi-touch, cancellation or a paused release, rotating on incidental twists, and dropping small pinch updates. Align the fling anchor with the native pan handler and begin touch panning at the measured 10-point UIKit boundary while preserving tap/gesture competition. Touches that start within 24 points of the leading screen edge keep the ordinary gesture arena, so edge swipes (back swipe, side drawers) still win their drags; the rotation gate measures the net twist rather than summed jitter, and still applies without event timestamps.
+
 ### 2.31.0
 
 * Introduce experimental `RasterLayer.rasterColorScale` property, resulting in more precise visualization with long-tailed raster-array data source.

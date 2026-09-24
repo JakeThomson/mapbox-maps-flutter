@@ -1,0 +1,79 @@
+[
+  {
+    "distance": 1,
+    "beganDistance": -1.0,
+    "changed": 0,
+    "taps": 1,
+    "maxMove": 1.0
+  },
+  {
+    "distance": 4,
+    "beganDistance": -1.0,
+    "changed": 0,
+    "taps": 1,
+    "maxMove": 4.0
+  },
+  {
+    "distance": 8,
+    "beganDistance": -1.0,
+    "changed": 0,
+    "taps": 1,
+    "maxMove": 8.0
+  },
+  {
+    "distance": 9,
+    "beganDistance": -1.0,
+    "changed": 0,
+    "taps": 1,
+    "maxMove": 9.0
+  },
+  {
+    "distance": 10,
+    "beganDistance": 10.0,
+    "changed": 0,
+    "taps": 0,
+    "maxMove": 9.0
+  },
+  {
+    "distance": 12,
+    "beganDistance": 12.0,
+    "changed": 0,
+    "taps": 0,
+    "maxMove": 9.0
+  },
+  {
+    "distance": 18,
+    "beganDistance": 13.333333333333343,
+    "changed": 2,
+    "taps": 0,
+    "maxMove": 8.666666666666657
+  },
+  {
+    "distance": 19,
+    "beganDistance": 13.333333333333343,
+    "changed": 2,
+    "taps": 0,
+    "maxMove": 8.666666666666657
+  },
+  {
+    "distance": 24,
+    "beganDistance": 13.0,
+    "changed": 3,
+    "taps": 0,
+    "maxMove": 8.333333333333343
+  },
+  {
+    "distance": 36,
+    "beganDistance": 12.333333333333343,
+    "changed": 6,
+    "taps": 0,
+    "maxMove": 8.0
+  },
+  {
+    "distance": 50,
+    "beganDistance": 12.0,
+    "changed": 8,
+    "taps": 0,
+    "maxMove": 7.333333333333343
+  }
+]
