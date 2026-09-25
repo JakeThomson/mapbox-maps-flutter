@@ -37,10 +37,13 @@ rootProject.allprojects {
 
 apply plugin: 'com.android.library'
 
-// Kotlin is built into AGP 9+. For older AGP (Flutter < 3.44) the
-// 'kotlin-android' plugin must still be applied explicitly.
+// Kotlin is built into AGP 9+, but apps migrated by the Flutter tool opt out
+// with android.builtInKotlin=false. Apply 'kotlin-android' whenever built-in
+// Kotlin is not active, so the kotlin {} extension below exists either way.
 def agpMajor = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')[0] as int
-if (agpMajor < 9) {
+def builtInKotlin = agpMajor >= 9 &&
+    (findProperty('android.builtInKotlin') ?: 'true').toString().toBoolean()
+if (!builtInKotlin) {
     apply plugin: 'kotlin-android'
 }
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
